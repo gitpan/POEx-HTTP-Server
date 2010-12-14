@@ -1,0 +1,23 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+lib/POEx/HTTP/Server.pm
+lib/POEx/HTTP/Server/Request.pm
+lib/POEx/HTTP/Server/Response.pm
+lib/POEx/HTTP/Server/Connection.pm
+t/00_compile.t
+t/01_pod.t
+t/02_pod_coverage.t
+t/10_init.t
+t/11_request.t
+t/12_response.t
+t/20_poe.t
+t/25_keepalive.t
+t/30_specials.t
+t/Server.pm
+t/something.txt
+eg/index.html
+eg/poex-httpd
+eg/something.txt
+META.yml                                 Module meta-data (added by MakeMaker)
