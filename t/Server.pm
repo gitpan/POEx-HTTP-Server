@@ -40,7 +40,6 @@ sub spawn
             inet  => { BindPort => $PORT },
             keepalive => $KA,
             alias => 'web-server',
-            error => 'poe:worker1/error',
             options => { debug => ::DEBUG, trace => 0 },
             headers => { Server => "$0/0.1" },
             handlers => [

@@ -9,7 +9,9 @@ use warnings;
 use Carp;
 use POE;
 use HTTP::Date;
-use HTTP::Status;
+use HTTP::Status qw( RC_NOT_FOUND RC_FORBIDDEN 
+                     RC_NOT_MODIFIED RC_INTERNAL_SERVER_ERROR );
+
 use File::Basename;
 
 use base qw( HTTP::Response );

@@ -9,12 +9,13 @@ use POE;
 use POE::Wheel::SocketFactory;
 use POE::Session::PlainCall;
 use POE::Session::Multiplex;
+use POEx::HTTP::Server::Error;
 use POEx::URI;
 use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 
 #######################################
@@ -168,6 +169,16 @@ sub build_handle
 }
 
 #######################################
+sub build_error
+{
+    my( $package, $uri ) = @_;
+    $uri ||= '/';
+    return POEx::HTTP::Server::Error->new( HTTP::Status::RC_INTERNAL_ERROR() );
+}
+
+
+
+#######################################
 sub build_server
 {
     my( $self ) = @_;
@@ -296,9 +307,18 @@ sub error
     delete $self->{server};
 
     $self->retry;
-    if( $self->{error} ) {
-        poe->kernel->post( @{ $self->{error} }, $op, $errnum, $errstr );
-    }
+    $self->on_error( $op, $errnum, $errstr );
+}
+
+#######################################
+sub on_error
+{
+    my( $self, $op, $errnum, $errstr ) = @_;
+
+    return unless $self->{specials}{on_error};
+    my $req = $self->build_error();
+    $req->details( $op, $errnum, $errstr );
+    poe->kernel->post( @{ $self->{specials}{on_error} }, $req );
 }
 
 #######################################
@@ -354,6 +374,7 @@ use POE::Filter::HTTPD;
 use POEx::HTTP::Server::Request;
 use POEx::HTTP::Server::Response;
 use POEx::HTTP::Server::Connection;
+use POEx::HTTP::Server::Error;
 use POE::Session::PlainCall;
 use POE::Session::Multiplex;
 use POE::Filter::Stream;
@@ -412,13 +433,13 @@ sub build_connect
 sub on_connect
 {
     my( $self ) = @_;
-    $self->special_dispatch( 'on_connect', $self->{connection} );
+    $self->special_dispatch( on_connect => $self->{connection} );
 }
 
 sub on_disconnect
 {
     my( $self ) = @_;
-    $self->special_dispatch( 'on_disconnect', $self->{connection} );
+    $self->special_dispatch( on_disconnect => $self->{connection} );
 }
 
 #######################################
@@ -427,11 +448,14 @@ sub client_error
     my( $self, $op, $errnum, $errstr, $id ) = @_;
     if( $op eq 'read' and $errnum == 0 ) {  
         # this is a normal error
-        # warn "$self->{name}: $op error ($errnum) $errstr";
+        $self->D and warn "$self->{name}: $op error ($errnum) $errstr";
     }
     else {
-        $self->invoke( 'ERROR', $self->{error}, $errnum, $errstr, $id );
-        warn "$self->{name}: $op error ($errnum) $errstr";
+        my $err = POEx::HTTP::Server->build_error;
+        $err->details( $op, $errnum, $errstr );
+        
+        $self->D and warn "$self->{name}: $op error ($errnum) $errstr";
+        $self->special_dispatch( on_error => $err );
     }
     $self->close;
 }
@@ -483,8 +507,7 @@ sub input
 
     die "New request while a request is pending ", pp $req if $self->{req};
     if ( $req->isa("HTTP::Response") ) {
-        die "ERROR", pp $req;
-        # poe->kernel->yield( $self->{on_error}, $req );
+        $self->input_error( $req );
         return;
     }
 
@@ -506,6 +529,17 @@ sub input
     $self->{flushed} = 0;
 
     $self->dispatch;
+}
+
+sub input_error
+{
+    my( $self, $resp ) = @_;
+    $self->D and warn "$self->{name}: ERROR ", $resp->status_line;
+    bless $resp, 'POEx::HTTP::Server::Error';
+    $self->special_dispatch( on_error => $resp );
+    $self->{resp} = $resp;
+    $self->{shutdown} = 1;
+    $self->respond;
 }
 
 #######################################
@@ -542,8 +576,10 @@ sub invoke
     my( $self, $re, $handler, @args ) = @_;
     $self->D and warn "$self->{name}: Invoke handler for '$re' ($handler)";
     eval { poe->kernel->call( @$handler, @args ) };
-    warn $@ if $@;
-    $self->{resp}->error( RC_INTERNAL_SERVER_ERROR, $@ ) if $@;
+    if( $@ ) {
+        warn $@;
+        $self->{resp}->error( RC_INTERNAL_SERVER_ERROR, $@ );
+    }
 }
 
 #######################################
@@ -614,7 +650,7 @@ sub should_close
 {
     my( $self ) = @_;
     $self->{will_close} = 1;
-    if ( $self->{req}->protocol eq 'HTTP/1.1' ) {
+    if ( $self->{req} and $self->{req}->protocol eq 'HTTP/1.1' ) {
         $self->{will_close} = 0;                   # keepalive
         # It turns out the connection field can contain multiple
         # comma separated values
@@ -843,9 +879,6 @@ Sets the server session's alias.  The alias defaults to 'HTTPd'.
 Sets the request concurrency level; this is the number of requests that 
 may be serviced in parallel.  Defaults to (-1) infinit concurrency.
 
-=head3 error
-
-
 =head3 headers
 
     POEx::HTTP::Server->spawn( concurrency => $HASHREF );
@@ -1027,18 +1060,38 @@ C<ARG1> is a L<POEx::HTTP::Server::Response> object, with it's C<content> cleare
                         handlers => { pre_request => 'poe:my-session/post' }
                      );
     sub post {
-        my( $object, $request, $response ) = @_[OBJECT, ARG0, ARG1];
+        my( $self, $request, $response ) = @_[OBJECT, ARG0, ARG1];
         my $connection = $request->connection;
         # ...
     }
 
 =head3 on_error
 
-B<TODO>
+Invoked when the server detects an error. C<ARG0> is a
+L<POEx::HTTP::Server::Error> object.  There are 2 types of errors: network
+errors and HTTP errors.  They are distiguished by calling the error object's
+C<op> method.  If C<op> returns undef(), it is an HTTP error, otherwise a
+network error.  HTTP error already has a message to the browser with HTML
+content. You may modify the HTTP error's content and headers before they get
+sent back to the browser.
 
-
-
-
+    POEx::HTTP::Server->spawn( 
+                        handlers => { on_error => 'poe:my-session/error' }
+                     );
+    sub error {
+        my( $self, $err ) = @_[OBJECT, ARG0];
+        if( $err->op ) {    # network error
+            $self->LOG( $err->op." error [".$err->errnum, "] ".$err->errstr );
+            # or the equivalent
+            $self->LOG( $err->content );
+        }
+        else {              # HTTP error
+            $self->LOG( $err->status_line );
+            $self->content_type( 'text/plain' );
+            $self->content( "Don't do that!" );
+        }
+    }
+    
 =head1 EVENTS
 
 =head2 shutdown

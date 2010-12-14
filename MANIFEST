@@ -6,6 +6,7 @@ lib/POEx/HTTP/Server.pm
 lib/POEx/HTTP/Server/Request.pm
 lib/POEx/HTTP/Server/Response.pm
 lib/POEx/HTTP/Server/Connection.pm
+lib/POEx/HTTP/Server/Error.pm
 t/00_compile.t
 t/01_pod.t
 t/02_pod_coverage.t
@@ -15,6 +16,7 @@ t/12_response.t
 t/20_poe.t
 t/25_keepalive.t
 t/30_specials.t
+t/31_error.t
 t/Server.pm
 t/something.txt
 eg/index.html
