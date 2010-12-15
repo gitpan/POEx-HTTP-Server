@@ -13,7 +13,7 @@ use URI;
 ################################################################################
 sub spawn
 {
-    my( $PORT, $KA ) = @_;
+    my( $PORT, $KA, $prefork ) = @_;
 
     $KA ||= 0;
 
@@ -39,6 +39,7 @@ sub spawn
     POEx::HTTP::Server->spawn(
             inet  => { BindPort => $PORT },
             keepalive => $KA,
+            prefork => $prefork,
             alias => 'web-server',
             options => { debug => ::DEBUG, trace => 0 },
             headers => { Server => "$0/0.1" },
@@ -47,6 +48,18 @@ sub spawn
                     '^/static'  => 'poe:worker1/static',
                     ''          => 'poe:worker2/dynamic',
                 ]
+        );
+}
+
+sub spawn_prefork
+{
+    POE::Component::Daemon->spawn(
+            alias   => 'Daemon',
+            verbose => ::DEBUG,
+            start_children  => 2,
+            requests        => 1,
+            min_spare       => 2,
+            max_children    => 10,
         );
 }
 
@@ -63,7 +76,7 @@ sub _start
 {
     my( $heap, $kernel ) = @_[HEAP, KERNEL];
     $kernel->alias_set( $heap->{alias} );
-    ::DEBUG and warn "$heap->{alias}: _start";
+    ::DEBUG and warn "$$:$heap->{alias}: _start";
     $kernel->sig( shutdown => 'shutdown' );
 }
 
@@ -71,7 +84,7 @@ sub _start
 sub _stop 
 {
     my( $heap, $kernel ) = @_[HEAP, KERNEL];
-    ::DEBUG and warn "$heap->{alias}: _stop";
+    ::DEBUG and warn "$$:$heap->{alias}: _stop";
 }
 
 #######################################
@@ -79,7 +92,7 @@ sub shutdown
 {
     my( $heap, $kernel ) = @_[HEAP, KERNEL];
     $kernel->alias_remove( $heap->{alias} );
-    ::DEBUG and warn "$heap->{alias}: shutdown";
+    ::DEBUG and warn "$$:$heap->{alias}: shutdown";
 }
 
 ################################################################################
@@ -104,7 +117,7 @@ sub _start
 sub USR1
 {
     my( $heap, $kernel ) = @_[HEAP, KERNEL];
-    ::DEBUG and warn "$heap->{alias}: USR1";
+    ::DEBUG and warn "$$:$heap->{alias}: USR1";
     $kernel->signal( $kernel => 'shutdown' );
 }
 
@@ -119,7 +132,7 @@ sub error
 sub root
 {
     my( $heap, $kernel, $req, $resp ) = @_[HEAP, KERNEL, ARG0, ARG1];
-    ::DEBUG and warn "$heap->{alias}: root";
+    ::DEBUG and warn "$$:$heap->{alias}: root";
     $resp->content_type( 'text/html' );
     $resp->content(<<HTML);
 <html>
@@ -143,7 +156,7 @@ sub static
     my( $heap, $kernel, $req, $resp ) = @_[HEAP, KERNEL, ARG0, ARG1];
     my $path = $req->uri->path;
     $path =~ s/\/static/t/;
-    ::DEBUG and warn "$heap->{alias}: static $path";
+    ::DEBUG and warn "$$:$heap->{alias}: static $path";
     $resp->sendfile( $path );
 }
 
@@ -165,7 +178,7 @@ use base qw( Worker );
 sub dynamic
 {
     my( $self, $heap, $kernel, $req, $resp ) = @_[OBJECT,HEAP, KERNEL, ARG0, ARG1];
-    ::DEBUG and warn "$heap->{alias}: dynamic";
+    ::DEBUG and warn "$$:$heap->{alias}: dynamic";
 
     my $path = $req->uri->path;
     if( $path =~ /shutdown/ ) {
@@ -180,13 +193,14 @@ sub dynamic
 sub dynamic_resp
 {
     my( $heap, $kernel, $req, $resp ) = @_[HEAP, KERNEL, ARG0, ARG1];
-    ::DEBUG and warn "$heap->{alias}: dynamic_resp";
+    ::DEBUG and warn "$$:$heap->{alias}: dynamic_resp";
 
     my $rq = pp $req;
     my $rp = pp $resp;
     # my $ev = pp \%ENV;
     $resp->content_type( 'text/plain' );
     $resp->content(<<TXT);
+\$PID=$$;
 \$REQ=$rq;
 \$RESP=$rp;
 TXT

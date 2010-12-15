@@ -1,7 +1,7 @@
 --- #YAML:1.0
 name:               POEx-HTTP-Server
-version:            0.02
-abstract:           HTTP server in pure POE
+version:            0.0400
+abstract:           POE HTTP server
 author:
     - Philip Gwyn <fil@localdomain>
 license:            unknown
@@ -17,7 +17,7 @@ requires:
     HTTP::Response:       1
     HTTP::Status:         1
     POE:                  1
-    POE::Session::Multiplex:  0.04
+    POE::Session::Multiplex:  0.0501
     POE::Session::PlainCall:  0.02
     POEx::URI:            0.03
     Scalar::Util:         0

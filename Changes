@@ -1,9 +1,19 @@
 Revision history for Perl extension POEx::HTTP::Server.
 
-0.02  Tue Dec 14 13:54
+0.0400 Wed Dec 15, 2010
+    - Document prefork
+    - Created POEx::HTTP::Server::Base
+    - Use POE::Session::Multiplex for _psm_begin
+    - Allow concurrency>1 and prefork
+    - Tweak the documentation
+
+0.03  Wed Dec 15, 2010
+    - Added prefork support
+
+0.02  Tue Dec 14, 2010
     - Added on_error
     - Fixed Response->is_error and ->is_success
 
-0.01  Mon Dec 13 07:13
+0.01  Mon Dec 13, 2010
     - Initial release
 

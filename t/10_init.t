@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use Data::Dump qw( pp );
-use Test::More tests => 25;
+use Test::More tests => 45;
 BEGIN { 
     use_ok('POEx::HTTP::Server');
 }
@@ -18,7 +18,7 @@ my $W = POEx::HTTP::Server->new( options => { debug => 1 },
 isa_ok( $W, 'POEx::HTTP::Server' );
 is( $W->{alias}, 'HTTPd', " ... default alias" );
 ok( $W->D, " ... debugging on" );
-is_deeply( $W->{headers}, { Server => 'POEx::HTTP::Server/0.01'}, 
+is_deeply( $W->{headers}, { Server => 'POEx::HTTP::Server/0.0400'}, 
                     " ... default headers" );
 is_deeply( $W->{inet}, { Listen=>1, BindPort=>808, Reuse=>1 }, 
                 " ... correct Inet" ) or warn pp $W->{inet};
@@ -70,7 +70,7 @@ is( $re, 'honk', "Not anchored" );
 is( $re, 'onk', "Correct priority" );
 
 #####
-$W->__init_handlers( { handlers => [
+$W->__init_handlers( { handlers => [ 
                                  'on_error' => 'something/error',
                                  'pre_request' => 'something/before',
                                  'post_request' => 'something/after',
@@ -85,3 +85,48 @@ is_deeply( $W->{specials}, { 'on_error' => 'poe:something/error',
                              'pre_request' => 'poe:something/before',
                              'post_request' => 'poe:something/after' }, 
                                 " ... correct special handler list" );
+
+
+#########################################################
+##### add as scalar
+$W->handlers_add( 'poe:/honk/honk' );
+pass( "Adding a handler doesn't die" );
+is_deeply( $W->{todo}, [ qw( honk onk bonk), '' ], " ... correct handler priority" );
+isa_ok( $W->{handlers}{''}, 'URI' );
+
+##### add as arrayref
+$W->handlers_add( [ zonk => 'poe:/honk/honk' ] );
+pass( "Adding a handlers doesn't die" );
+is_deeply( $W->{todo}, [ qw( honk onk bonk), '', 'zonk' ], 
+                    " ... correct handler priority" );
+isa_ok( $W->{handlers}{''}, 'URI' ) or die pp $W->{handlers};
+isa_ok( $W->{handlers}{'zonk'}, 'URI' );
+
+##### add as hashref
+$W->handlers_add( { thunk => 'poe:/honk/honk' } );
+pass( "Adding a handlers doesn't die" );
+is_deeply( $W->{todo}, [ qw( honk onk bonk), '', qw( zonk thunk ) ], 
+                    " ... correct handler priority" );
+isa_ok( $W->{handlers}{''}, 'URI' ) or die pp $W->{handlers};
+isa_ok( $W->{handlers}{'thunk'}, 'URI' );
+
+
+##### remove scalar
+$W->handlers_remove( 'honk' );
+pass( "Removing a handler doesn't die" );
+is_deeply( $W->{todo}, [ qw( onk bonk), '', qw( zonk thunk ) ], " ... correct handler priority" );
+isa_ok( $W->{handlers}{''}, 'URI' );
+
+##### add as arrayref
+$W->handlers_remove( [ qw( zonk bonk ) ] );
+pass( "Removing a handler doesn't die" );
+is_deeply( $W->{todo}, [ qw( onk ), '', qw( thunk ) ], 
+                    " ... correct handler priority" );
+isa_ok( $W->{handlers}{''}, 'URI' ) or die pp $W->{handlers};
+
+##### add as hashref
+$W->handlers_remove( { '' => 'poe:/honk/honk', 'onk' => 1  } );
+pass( "Removing a handlers doesn't die" );
+is_deeply( $W->{todo}, [ qw( thunk ) ], 
+                    " ... correct handler priority" );
+isa_ok( $W->{handlers}{'thunk'}, 'URI' );

@@ -14,6 +14,7 @@ pod_coverage_ok(
         { also_private => [ qw( D new retry do_retry drop accept build_client 
                             build_server build_session build_handle close done
                             build_error error
+                            prefork_child prefork_parent prefork_shutdown
                             concurrency_up concurrency_down ) ], 
         },
         "POEx::HTTP::Server, ignoring private functions",

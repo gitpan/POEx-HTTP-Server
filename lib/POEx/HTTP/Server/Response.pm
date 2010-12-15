@@ -82,7 +82,7 @@ sub __fix_headers
         $self->header( 'Date', time2str(time) );
     }
 
-    if( not defined $self->header( 'Content-Length' )  and
+    if( not defined $self->header( 'Content-Length' ) and
         not $self->streaming and $req->method ne 'HEAD' ) {
         use bytes;
         my $c = $self->content;

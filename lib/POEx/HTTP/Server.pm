@@ -8,14 +8,81 @@ use Carp qw( carp croak confess cluck );
 use POE;
 use POE::Wheel::SocketFactory;
 use POE::Session::PlainCall;
-use POE::Session::Multiplex;
+use POE::Session::Multiplex qw( ev evo evos ), 0.0500;
 use POEx::HTTP::Server::Error;
 use POEx::URI;
 use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.02';
+our $VERSION = '0.0400';
+
+
+##############################################################################
+# Methods common to both the Server and the Client
+package POEx::HTTP::Server::Base;
+
+use strict;
+use warnings;
+
+use POE;
+use POE::Session::PlainCall;
+use HTTP::Status;
+
+use Data::Dump qw( pp );
+
+# Virtual methods
+sub _psm_begin { die "OVERLOAD ME" }
+sub _psm_end   { return }
+
+
+#######################################
+# Dispatch a call to a special handler
+sub special_dispatch
+{
+    my( $self, $why, @args ) = @_;
+
+    my $handler = $self->{specials}{$why};
+    return unless $handler;
+    $self->invoke( $why, $handler, @args );
+}
+
+#######################################
+# Invoke an HTTP or special handler
+sub invoke
+{
+    my( $self, $re, $handler, @args ) = @_;
+    $self->D and warn "$$:$self->{name}: Invoke handler for '$re' ($handler)";
+    eval { poe->kernel->call( @$handler, @args ) };
+    if( $@ ) {
+        warn $@;
+        if( $self->{resp} ) {
+            $self->{resp}->error( RC_INTERNAL_SERVER_ERROR, $@ );
+        }
+    }
+}
+
+#######################################
+sub net_error
+{
+    my( $self, $op, $errnum, $errstr ) = @_;
+    unless( $self->{specials}{on_error} ) {
+        # skip out early
+        warn "$$:$self->{name}: $op error ($errnum) $errstr";
+        return;
+    }
+
+    $self->D and warn "$$:$self->{name}: $op error ($errnum) $errstr";
+
+    my $err = POEx::HTTP::Server->build_error;
+    $err->details( $op, $errnum, $errstr );        
+    $self->special_dispatch( on_error => $err );
+}
+
+##############################################################################
+package POEx::HTTP::Server;
+
+use base qw( POEx::HTTP::Server::Base );
 
 
 #######################################
@@ -57,6 +124,8 @@ sub __init
     $self->{concurrency} = delete $opt->{concurrency};
     $self->{concurrency} = -1 unless defined $self->{concurrency};
 
+    $self->{prefork} = delete $opt->{prefork};
+
     $self->{inet}   = delete $opt->{inet};
     my $I = $self->{inet} || {};
     $I->{Listen} ||= 1;
@@ -67,8 +136,9 @@ sub __init
     $I->{BindPort} = delete $I->{LocalPort} 
                 if $I->{LocalPort} and not defined $I->{BindPort};
 
-    $self->{alias}  = delete $opt->{alias};
+    $self->{alias} = delete $opt->{alias};
     $self->{alias} ||= 'HTTPd';
+    $self->{name} = $self->{alias};
 
     if( $opt->{error} ) {
         $self->{error}  = POEx::URI->new( delete $opt->{error} );
@@ -84,6 +154,10 @@ sub __init
     if( not defined $self->{keepalivetimeout} and $self->{keepalive} ) {
         $self->{keepalivetimeout} = 15;
     }
+
+#    if( $self->{concurrency} > 0 and $self->{prefork} ) {
+#        croak "Concurrency and prefork are incompatible.  Choose one or the other";
+#    }
 
     $self->__init_handlers( $opt );
 }
@@ -142,20 +216,24 @@ sub build_session
 {
     my( $self ) = @_;
 
+    my $package = __PACKAGE__;
     return POEx::HTTP::Server::Session->create( 
                       options => $self->{options}, 
                       package_states => [
-                                ref( $self ) => [ qw( _start _stop shutdown 
-                                                      build_server close
-                                                      accept error retry
-                                                ) ],
-                                'POEx::HTTP::Server::Client' => [ qw( 
-                                                    input client_error
-                                                    timeout 
-                                                    shutdown_client
-                                                    respond send flushed done
-                                                ) ]
-                            ],
+                            'POEx::HTTP::Server::Base' =>
+                                [ qw( _psm_begin ) ],
+                            $package => [ 
+                                qw( _start shutdown build_server
+                                    accept error retry close
+                                    handlers_get handlers_add handlers_remove
+                                    prefork_child prefork_accept 
+                                    prefork_parent prefork_shutdown
+                                ) ],
+                            'POEx::HTTP::Server::Client' => [ 
+                                qw( input client_error timeout 
+                                    shutdown_client respond send flushed done
+                            ) ]
+                      ],
                       args => [ $self ],
                       heap => { O=>$self }
                     );
@@ -176,15 +254,13 @@ sub build_error
     return POEx::HTTP::Server::Error->new( HTTP::Status::RC_INTERNAL_ERROR() );
 }
 
-
-
 #######################################
 sub build_server
 {
     my( $self ) = @_;
-    $self->D and warn "$self->{alias}: build_server";
+    $self->D and warn "$$:$self->{name}: build_server";
     my %invoke = $self->build_handle;
-    $self->D and warn "$self->{alias}: ", pp \%invoke;
+    $self->D and warn "$$:$self->{name}: ", pp \%invoke;
     $self->{server} = POE::Wheel::SocketFactory->new(
             %invoke,
             SuccessEvent => ev 'accept',
@@ -196,28 +272,38 @@ sub build_server
 sub drop
 {
     my( $self ) = @_;
-    $self->D and warn "$self->{alias}: drop";
+    $self->D and warn "$$:$self->{name}: drop";
     delete $self->{server};
     return;
 }
+
 
 #######################################
 sub _start
 {
     my( $package, $self ) = @_;
-    $self->D and warn "$self->{alias}: _start";
+    $self->D and warn "$$:$self->{name}: _start";
     $poe_kernel->alias_set( $self->{alias} );
-
     poe->session->object( HTTPd => $self );
-    $poe_kernel->sig( shutdown => evo HTTPd => "shutdown" );
-    $poe_kernel->yield( evo HTTPd => 'build_server' );
     return;
+}
+
+sub _psm_begin
+{
+    my( $self ) = @_;
+    $self->D and warn "$$:$self->{name}: setup";
+    $poe_kernel->sig( shutdown => ev"shutdown" );
+    $self->build_server;
+    if( $self->{prefork} ) {
+        $self->__init_prefork;
+        $self->{server}->pause_accept;
+    }
 }
 
 sub done
 {
     my( $self ) = @_;
-    $self->D and warn "$self->{alias}: done";
+    $self->D and warn "$$:$self->{name}: done";
     poe->session->object_unregister( 'HTTPd' );
 }
 
@@ -227,17 +313,17 @@ sub _stop
 {
     my( $package ) = @_;
     my $self = poe->heap->{O};
-    $self->D and warn "$self->{alias}: _stop";
+    $self->D and warn "$$:$self->{name}: _stop";
 }
 
 #######################################
 sub shutdown
 {
     my( $self ) = @_;
-    $self->D and warn "$self->{alias}: Shutdown";
-    $poe_kernel->alias_remove( $self->{alias} );
+    $self->D and warn "$$:$self->{name}: Shutdown";
+    $poe_kernel->alias_remove( delete $self->{alias} ) if $self->{alias};
     foreach my $name ( keys %{ $self->{clients}||{} } ) {
-        $self->D and warn "$self->{alias} shutdown client=$name";
+        $self->D and warn "$$:$self->{alias} shutdown client=$name";
         $poe_kernel->yield( evo $name => 'shutdown_client' );
     }
     $self->drop;
@@ -248,7 +334,7 @@ sub accept
 {
     my( $self, $socket, $peer ) = @_;
     
-    $self->D and warn "$self->{alias}: accept";
+    $self->D and warn "$$:$self->{name}: accept";
     my $obj = $self->build_client( $self->{N}++, $socket );
     poe->session->object( $obj->name, $obj );
     $obj->build_wheel( $socket );
@@ -256,16 +342,18 @@ sub accept
     $self->concurrency_up;
     $self->{clients}{$obj->name} = 1;
 
-    $obj->on_connect;
+    $self->prefork_accepted;
 }
 
 sub close
 {
     my( $self, $name ) = @_;
-    $self->D and warn "$self->{alias}: close $name";
+    $self->D and warn "$$:$self->{name}: close $name";
 
     $self->concurrency_down;
     delete $self->{clients}{$name};
+
+    $self->prefork_close;
 
     unless( $self->{C} > 0 or $self->{server} ) {
         $self->done;
@@ -277,8 +365,9 @@ sub concurrency_up
     my( $self ) = @_;
     $self->{C}++;
     return unless $self->{concurrency} > 0;
+    return if $self->{prefork};
     if( $self->{C} >= $self->{concurrency} ) {
-        $self->D and warn "$self->{alias}: pause_accept C=$self->{C}";
+        $self->D and warn "$$:$self->{name}: pause_accept C=$self->{C}";
         $self->{server}->pause_accept;
         $self->{paused} = 1;
     }
@@ -289,9 +378,10 @@ sub concurrency_down
     my( $self ) = @_;
     $self->{C}--;
     return unless $self->{concurrency} > 0;
+    return if $self->{prefork};
     unless( $self->{C} >= $self->{concurrency} and $self->{paused} ) {
         if( $self->{server} ) {
-            $self->D and warn "$self->{alias}: resume_accept C=$self->{C}";
+            $self->D and warn "$$:$self->{name}: resume_accept C=$self->{C}";
             $self->{server}->resume_accept;
         }
         $self->{paused} = 0;
@@ -303,22 +393,10 @@ sub error
 {
     my( $self, $op, $errnum, $errstr, $id ) = @_;
     
-    $self->D and warn "$self->{alias}: error ($errnum) $errstr";
+    $self->net_error( $op, $errnum, $errstr );
     delete $self->{server};
 
     $self->retry;
-    $self->on_error( $op, $errnum, $errstr );
-}
-
-#######################################
-sub on_error
-{
-    my( $self, $op, $errnum, $errstr ) = @_;
-
-    return unless $self->{specials}{on_error};
-    my $req = $self->build_error();
-    $req->details( $op, $errnum, $errstr );
-    poe->kernel->post( @{ $self->{specials}{on_error} }, $req );
 }
 
 #######################################
@@ -327,7 +405,7 @@ sub retry
     my( $self ) = @_;
     return unless $self->{retry};
     my $tid = poe->kernel->delay_set( ev"do_retry" => $self->{retry} );
-    $self->D and warn "$self->{alias}: Retry in $self->{retry} seconds.  tid=$tid.";
+    $self->D and warn "$$:$self->{name}: Retry in $self->{retry} seconds.  tid=$tid.";
     return $tid;
 }
 
@@ -335,8 +413,166 @@ sub retry
 sub do_retry
 {
     my( $self ) = @_;
-    $self->D and warn "$self->{alias}: do_retry";
+    $self->D and warn "$$:$self->{name}: do_retry";
     $self->build_server;
+}
+
+
+
+
+#######################################
+sub handlers_get
+{
+    my( $self ) = @_;
+    my $ret = dclone $self->{handlers};
+    my $S = dclone $self->{specials};
+    @{ $ret }{ keys %$S } = values %$S;
+    return $ret;
+}
+
+#######################################
+sub handlers_set
+{
+    my( $self, $H ) = @_;
+    $self->__init_handlers( { handlers=>$H } );
+    return 1;
+}
+
+#######################################
+sub handlers_add
+{
+    my( $self, $new ) = @_;
+    return unless defined $new;
+    my $H = $self->{handlers};
+    my $S = $self->{specials};
+    my $T = $self->{todo};
+    $self->__init_handlers( {handlers=>$new} );
+    delete @{ $S }{ keys %{ $self->{specials} } };
+    @{ $self->{specials} }{ keys %$S } = values %$S;
+
+    delete @{ $H }{ keys %{ $self->{handlers} } };
+    my @todo;
+    foreach my $re ( @$T ) {
+        next if $self->{handlers}{$re};
+        push @todo, $re;
+    }
+    push @todo, @{ $self->{todo} };
+    $self->{todo} = \@todo;
+    @{ $self->{handlers} }{ keys %$H } = values %$H;
+
+    return 1;
+}
+
+#######################################
+sub handlers_remove
+{
+    my( $self, $del ) = @_;
+    my @list;
+    my %R;
+    unless( ref $del ) {
+        @list = $del;
+    }
+    elsif( 'HASH' eq ref $del ) {
+        @list = keys %$del;        
+    }
+    else {
+        @list = @$del;
+    }
+    foreach my $re ( @list ) {
+        if( __is_special( $re ) ) {
+            delete $self->{specials}{ $re };
+        }
+        else {
+            $R{$re} = 1;
+            delete $self->{handlers}{ $re };
+        }
+    }
+
+    my @todo;
+    foreach my $re ( @{ $self->{todo} } ) {
+        next if $R{$re};
+        push @todo, $re;
+    }
+    $self->{todo} = \@todo;
+}
+
+
+#######################################
+sub __init_prefork
+{
+    my( $self ) = @_;
+    return unless $self->{prefork};
+    $self->D and warn "$$:$self->{name}: __init_prefork";
+
+    $self->{parent} = 1;
+    poe->kernel->sig( daemon_child => ev 'prefork_child' );
+    poe->kernel->sig( daemon_parent => ev 'prefork_parent' );
+    poe->kernel->sig( daemon_accept => ev 'prefork_accept' );
+    poe->kernel->sig( daemon_shutdown => ev 'prefork_shutdown' );
+}
+
+#######################################
+sub prefork
+{
+    my( $package, $status ) = @_;
+    poe->kernel->post( Daemon => update_status => $status );
+}
+
+#######################################
+# Called to tell us we are the child
+sub prefork_child
+{
+    my( $self ) = @_;
+    $self->D and warn "$$:$self->{name}: prefork_child";
+    delete $self->{parent};
+    $self->prefork( 'wait' );
+}
+
+#######################################
+# Called when we are the child, and we move to wait state
+sub prefork_accept
+{
+    my( $self ) = @_;
+    $self->D and warn "$$:$self->{name}: prefork_accept";
+    $self->{server}->resume_accept;
+}
+
+#######################################
+# Called when a new connection opens
+sub prefork_accepted
+{
+    my( $self ) = @_;
+    $self->D and warn "$$:$self->{name}: prefork_accepted";
+    return unless $self->{prefork};
+    $self->prefork( 'req' );
+    $self->{server}->pause_accept unless $self->{concurrency} > 0;
+}
+
+#######################################
+# Called when a connection is closed
+sub prefork_close
+{
+    my( $self ) = @_;
+    $self->D and warn "$$:$self->{name}: prefork_close";
+    return unless $self->{prefork};
+    $self->prefork( 'done' );
+}
+
+#######################################
+# Called when it is clear we are the parent
+sub prefork_parent 
+{
+    my( $self ) = @_;
+    $self->D and warn "$$:$self->{name}: prefork_parent";
+    $self->{parent} = $$;
+}
+
+#######################################
+sub prefork_shutdown
+{
+    my( $self ) = @_;
+    $self->D and warn "$$:$self->{name}: prefork_shutdown";
+    $self->shutdown;
 }
 
 #######################################
@@ -345,7 +581,7 @@ sub build_client
     my( $self, $N, $socket ) = @_;
     my $name = join '-', $self->{alias}, $N;
     return POEx::HTTP::Server::Client->new( 
-                    socket => $socket,
+                    socket  => $socket,
                     __close => ev"close",
                     alias => $self->{alias}, 
                     name  => $name, 
@@ -354,7 +590,7 @@ sub build_client
                     handlers => dclone $self->{handlers},
                     specials => dclone $self->{specials},
                     headers => $self->{headers},
-                    error => $self->{error},
+                    error   => $self->{error},
                     keepalive => $self->{keepalive},
                     keepalivetimeout => $self->{keepalivetimeout},
                 );
@@ -379,6 +615,7 @@ use POE::Session::PlainCall;
 use POE::Session::Multiplex;
 use POE::Filter::Stream;
 
+use base qw( POEx::HTTP::Server::Base );
 
 use Data::Dump qw( pp );
 
@@ -421,12 +658,18 @@ sub build_stream_filter
     return POE::Filter::Stream->new;
 }
 
-
 sub build_connect
 {
     my( $self, $socket ) = @_;
     $self->{connection} = 
                 POEx::HTTP::Server::Connection->new( $self->{name}, $socket );
+}
+
+#######################################
+sub _psm_begin
+{
+    my( $self ) = @_;
+    $self->on_connect;
 }
 
 #######################################
@@ -448,14 +691,10 @@ sub client_error
     my( $self, $op, $errnum, $errstr, $id ) = @_;
     if( $op eq 'read' and $errnum == 0 ) {  
         # this is a normal error
-        $self->D and warn "$self->{name}: $op error ($errnum) $errstr";
+        $self->D and warn "$$:$self->{name}: $op error ($errnum) $errstr";
     }
     else {
-        my $err = POEx::HTTP::Server->build_error;
-        $err->details( $op, $errnum, $errstr );
-        
-        $self->D and warn "$self->{name}: $op error ($errnum) $errstr";
-        $self->special_dispatch( on_error => $err );
+        $self->net_error( $op, $errnum, $errstr );
     }
     $self->close;
 }
@@ -465,7 +704,7 @@ sub close
 {
     my( $self ) = @_;
     $self->{will_close} = 0;
-    $self->D and warn "$self->{name}: Close";
+    $self->D and warn "$$:$self->{name}: Close";
     poe->kernel->yield( $self->{__close}, $self->name );
     poe->session->object_unregister( $self->{name} );
     $self->on_disconnect;
@@ -476,7 +715,7 @@ sub close
 sub close_connection
 {
     my( $self ) = @_;
-    $self->D and warn "$self->{name}: close_connection";
+    $self->D and warn "$$:$self->{name}: close_connection";
     delete $self->{connection};
     my $W = delete $self->{wheel};
     $W->DESTROY if $W;
@@ -494,7 +733,7 @@ sub flushed
 {
     my( $self ) = @_;
     $self->{flushed} = 1;
-    $self->D and warn "$self->{name}: Flushed";
+    $self->D and warn "$$:$self->{name}: Flushed";
     $self->drop;
     $self->close if $self->{will_close};
 }
@@ -534,7 +773,7 @@ sub input
 sub input_error
 {
     my( $self, $resp ) = @_;
-    $self->D and warn "$self->{name}: ERROR ", $resp->status_line;
+    $self->D and warn "$$:$self->{name}: ERROR ", $resp->status_line;
     bless $resp, 'POEx::HTTP::Server::Error';
     $self->special_dispatch( on_error => $resp );
     $self->{resp} = $resp;
@@ -562,7 +801,7 @@ sub dispatch
 sub find_handler
 {
     my( $self, $path ) = @_;
-    $self->D and warn "$self->{name}: Request for $path";
+    $self->D and warn "$$:$self->{name}: Request for $path";
     foreach my $re ( @{ $self->{todo} } ) {
         next unless $re eq '' or $path =~ /$re/;
         return( $re, $self->{handlers}{$re} );
@@ -571,33 +810,11 @@ sub find_handler
 }
 
 #######################################
-sub invoke
-{
-    my( $self, $re, $handler, @args ) = @_;
-    $self->D and warn "$self->{name}: Invoke handler for '$re' ($handler)";
-    eval { poe->kernel->call( @$handler, @args ) };
-    if( $@ ) {
-        warn $@;
-        $self->{resp}->error( RC_INTERNAL_SERVER_ERROR, $@ );
-    }
-}
-
-#######################################
-sub special_dispatch
-{
-    my( $self, $why, @args ) = @_;
-
-    my $handler = $self->{specials}{$why};
-    return unless $handler;
-    $self->invoke( $why, $handler, @args );
-}
-        
-#######################################
 sub respond
 {
     my( $self ) = @_;
 
-    $self->D and warn "$self->{name}: respond";
+    $self->D and warn "$$:$self->{name}: respond";
     confess "Responding more then once to a request" if $self->{once};
     $self->{once}++;
 
@@ -614,7 +831,7 @@ sub send_headers
 {
     my( $self ) = @_;
 
-    $self->D and warn "$self->{name}: Response: ".$self->{resp}->status_line;
+    $self->D and warn "$$:$self->{name}: Response: ".$self->{resp}->status_line;
     $self->__fix_headers;
     $self->{wheel}->put( $self->{resp} );
     $self->{resp}->sent( 1 );
@@ -656,25 +873,25 @@ sub should_close
         # comma separated values
         my $conn = $self->{req}->header('Connection')||'';
         $self->{will_close} = 1 if qq(,$conn,) =~ /,\s*close\s*,/i;
-        #warn "conn=$conn will_close=$self->{will_close}";
+        #warn "$$:conn=$conn will_close=$self->{will_close}";
         # Allow handler code to control the connection
         $conn = $self->{resp}->header('Connection')||'';
         $self->{will_close} = 1 if qq(,$conn,) =~ /,\s*close\s*,/i;
-        #warn "conn=$conn will_close=$self->{will_close}";
+        #warn "$$:conn=$conn will_close=$self->{will_close}";
     }
     else {
         # HTTP/1.0-style keep-alives fail
         #my $conn = $self->{req}->header('Connection')||'';
         #$self->{will_close} = 0 if qq(,$conn,) =~ /,\s*keep-alive\s*,/i;
-        #warn "conn=$conn will_close=$self->{will_close}";
+        #warn "$$:conn=$conn will_close=$self->{will_close}";
     }
 
     $self->{will_close} = 0 if $self->{resp}->streaming;
-    #warn "post streaming will_close=$self->{will_close}";
+    #warn "$$:post streaming will_close=$self->{will_close}";
     $self->{will_close} = 1 unless $self->{keepalive} > 1;
-    #warn "post keepalive will_close=$self->{will_close}";
+    #warn "$$:post keepalive will_close=$self->{will_close}";
     $self->{will_close} = 1 if $self->{shutdown};
-    $self->D and warn "$self->{name}: should_close = $self->{will_close}";
+    $self->D and warn "$$:$self->{name}: should_close = $self->{will_close}";
     return $self->{will_close};
 }
 
@@ -694,12 +911,12 @@ sub keepalive_start
     return if $self->{will_close};
     $self->{keepalive}--;
     return unless $self->{keepalive} > 0;
-    $self->D and warn "$self->{name}: keep-alive=$self->{keepalive}";
-    $self->D and warn "$self->{name}: keep-alive timeout=$self->{keepalivetimeout}";
+    $self->D and warn "$$:$self->{name}: keep-alive=$self->{keepalive}";
+    $self->D and warn "$$:$self->{name}: keep-alive timeout=$self->{keepalivetimeout}";
     $self->{TID} = poe->kernel->delay_set( ev"timeout", 
                                                $self->{keepalivetimeout} 
                                              );
-    $self->D and warn "$self->{name}: keep-alive start tid=$self->{TID}";
+    $self->D and warn "$$:$self->{name}: keep-alive start tid=$self->{TID}";
 }
 
 sub timeout
@@ -714,7 +931,7 @@ sub keepalive_stop
 {
     my( $self ) = @_;
     return unless $self->{TID};
-    $self->D and warn "$self->{name}: keep-alive stop tid=$self->{TID}";
+    $self->D and warn "$$:$self->{name}: keep-alive stop tid=$self->{TID}";
     poe->kernel->alarm_remove( delete $self->{TID} );
 }
 
@@ -722,7 +939,7 @@ sub keepalive_stop
 sub shutdown_client
 {
     my( $self ) = @_;
-    $self->D and warn "$self->{name}: shutdown_client";
+    $self->D and warn "$$:$self->{name}: shutdown_client";
     $self->{shutdown} = 1;
     $self->{will_close} = 1;
     $self->close if $self->{flushed};
@@ -739,7 +956,6 @@ use warnings;
 use POE::Session::PlainCall;
 use POE::Session::Multiplex;
 
-use Data::Dump qw( pp );
 use base qw( POE::Session::Multiplex POE::Session::PlainCall );
 
 
@@ -750,7 +966,7 @@ __END__
 
 =head1 NAME
 
-POEx::HTTP::Server - HTTP server in pure POE
+POEx::HTTP::Server - POE HTTP server
 
 =head1 SYNOPSIS
 
@@ -792,14 +1008,19 @@ HTML
 
 =head1 DESCRIPTION
 
-POEx::HTTP::Server is a clean reimplementation of an HTTP server.  It uses
+POEx::HTTP::Server is a clean POE implementation of an HTTP server.  It uses
 L<POEx::URI> to simplify event specification.  It allows limiting connection
-concurrency.  
+concurrency and implements HTTP 1.1 keep-alive.  It has built in
+compatibility with L<POE::Component::Daemon>'s L</prefork> server support.
 
+POEx::HTTP::Server also includes a method for easily sending a static file
+to the browser, with HEAD and If-Modified-Since support.
 
+POEx::HTTP::Server enforces some of the HTTP 1.1 requirements, such as
+the C<Content-Length> and C<Date> headers.
 
-POEx::HTTP::Server differs from L<POE::Component::Server::HTTP> by having a cleaner
-code base and still being maintained.
+POEx::HTTP::Server differs from L<POE::Component::Server::HTTP> by having a
+cleaner code base and by being actively maintained.
 
 POEx::HTTP::Server differs from L<POE::Component::Server::SimpleHTTP> by not
 using Moose and not using the YELLING-STYLE of parameter passing.
@@ -822,7 +1043,7 @@ parameters:
 Specify the parameters handed to L<POE::Wheel::SocketFactory> when creating
 the listening socket.
 
-As a convenience, C<LocalAddr> is changed into C<BindAddress> and 
+As a convenience, C<LocalAddr> is changed into C<BindAddr> and 
 C<LocalPort> into C<BindPort>.
 
 
@@ -856,7 +1077,7 @@ The handler for C<onk> will always match before C<honk> can.
 
 Use C<''> if you want a catchall handler.
 
-See L<HANDLERS> below.
+See L</HANDLERS> below.
 
 =head3 handler
 
@@ -876,15 +1097,25 @@ Sets the server session's alias.  The alias defaults to 'HTTPd'.
 
     POEx::HTTP::Server->spawn( concurrency => $NUM );
     
-Sets the request concurrency level; this is the number of requests that 
-may be serviced in parallel.  Defaults to (-1) infinit concurrency.
+Sets the request concurrency level; this is the number of connections that
+are allowed in parallel.  Set to 1 if you want zero concurrency, that is
+only one connection at a time.
+
+Be aware that by activating L</keepalive>, a connection may last for many
+seconds.  If concurrency is low, this will severly limit the availability of
+the server.  If only want one request to be handled at a time, either turn
+set keepalive off or use L</prefork>.
+
+Defaults to (-1), unlimited concurrency.
 
 =head3 headers
 
-    POEx::HTTP::Server->spawn( concurrency => $HASHREF );
+    POEx::HTTP::Server->spawn( headers => $HASHREF );
 
 All the key/value pairs in C<$HASHREF> will be set as HTTP headers on
 all responses.
+
+By default, the C<Server> header is set.
 
 =head3 keepalive
 
@@ -901,6 +1132,20 @@ all responses.
 
 Options passed L<POE::Session>->create.  You may also specify C<debug> to 
 turn on some debugging output.
+
+=head3 prefork
+
+    POEx::HTTP::Server->spawn( prefork => 1 );
+
+Turns on the L<POE::Component::Daemon> pre-fork server support.  You must
+spawn and configure the POE::Component::Daemon yourself.  
+
+Defaults to 0, no preforking support.
+
+In a normal pre-forking server, only one request may be handled by a child
+process at the same time.  This is equivalent to L</concurrency> = 1. 
+However, you may set concurrecy to another value, so that each child process
+may handle several request at the same time.  This has not been tested.
 
 =head3 retry
 
@@ -1011,7 +1256,7 @@ C<ARG1> and C<ARG2> respectively.
 There are 5 special handlers that are invoked when a browser connection is opened and closed,
 before and after each request and when an error occurs.
 
-The note about L<handler parameters> also aplies to special handlers.
+The note about L</handler parameters> also aplies to special handlers.
 
 =head3 on_connect
 
@@ -1034,7 +1279,7 @@ invoked more often then C<on_connect>.
 =head3 on_disconnect
 
 Invoked when a connection is closed. C<ARG0> is the same
-L<POEx::HTTP::Server::Connection> object that was passed to L<on_connect>.
+L<POEx::HTTP::Server::Connection> object that was passed to L</on_connect>.
 
 =head3 pre_request
 
@@ -1104,27 +1349,95 @@ active.  The session will exit when the last of the requests has exited.
 
 =head2 handlers_get
 
-B<TODO>
+    my $handlers = $poe_kernel->call( HTTPd => 'handlers_get' );
+
+Fetch a hashref of handlers and their URIs.  This list contains both the
+special handlers and the HTTP handlers.
 
 =head2 handlers_set
 
-B<TODO>
+    $poe_kernel->call( HTTPD => handlers_set => $URI );
+    $poe_kernel->call( HTTPD => handlers_set => $ARRAYREF );
+    $poe_kernel->call( HTTPD => handlers_set => $HASHREF );
+
+Change all the handlers at once.  The sole parameter is the same as L</handlers>
+passed to L</spawn>.
+
+Note that modifying the set of handlers will only modify the handlers for
+new connections, not currently open connections.
 
 =head2 handlers_add
 
-B<TODO>
+    $poe_kernel->call( HTTPD => handlers_add => $URI );
+    $poe_kernel->call( HTTPD => handlers_add => $ARRAYREF );
+    $poe_kernel->call( HTTPD => handlers_add => $HASHREF );
+
+Add new handlers to the server, overriding any that might already exist. 
+The ordering of handlers is preserved, with all new handlers added to the
+end of the list.  The sole parameter is the same as L</handlers>
+passed to L</spawn>.
+
+Note that modifying the set of handlers will only modify the handlers for
+new connections, not currently open connections.
+
 
 =head2 handlers_remove
 
-B<TODO>
+    $poe_kernel->call( HTTPD => handlers_remove => $RE );
+    $poe_kernel->call( HTTPD => handlers_remove => $ARRAYREF );
+    $poe_kernel->call( HTTPD => handlers_remove => $HASHREF );
+
+Remove one or more handlers from the server.  The handlers are removed based
+on the regex, not the handler's URI.  The regex must be exactly identical to
+the regex supplied to L</handlers>.
+
+The sole parameter may be :
+
+=head3 $RE
+
+    $poe_kernel->call( HTTPD => handers_remove => '^/static' );
+
+The handler associated with this regex is removed.  
+
+=head3 $ARRAYREF
+
+    $poe_kernel->call( HTTPD => handers_remove => 
+                            [ '^/static', '^/static/bigger' ] );
+
+Remove a list of handlers associated.
+
+=head3 $HASHREF
+
+    $poe_kernel->call( HTTPD => handers_remove => 
+                            { '^/static' => 1, '^/static/bigger' => 1 } );
+
+The hash's keys are a list of regexes to remove.  The values are ignored.
+
+Note that modifying the set of handlers will not modify the handlers for
+currently open connections.
+
 
 =head1 SEND HEADERS
 
-B<TO BE WRITEN>
+If you wish to send the headers right away, but send the body later, you may do:
+
+    $resp->header( 'Content-Length' => $size );
+    $resp->send;
+
+When you want to send the body:
+
+    $resp->send( $content );
+
+When you are finished:
+
+    $resp->done;
 
 =head1 STREAMING
 
-B<TO BE WRITEN>
+Streaming is very similar to sending the headers and body seperately.  See above.
+One difference is that you will want to be advised when a block has been sent.
+This needs B<TO BE WRITEN>.
+
 
 =head1 SEE ALSO
 

@@ -1,6 +1,14 @@
 POEx-HTTP-Server version 0.01
 =============================
 
+POEx::HTTP::Server is a clean POE implementation of an HTTP server.  It uses
+POEx::URI to simplify event specification.  It allows limiting connection
+concurrency and implements HTTP 1.1 keep-alive.  It has built in
+compatibility with POE::Component::Daemon's prefork server support.
+
+POEx::HTTP::Server also includes a method for easily sending a static file
+to the browser, with HEAD and If-Modified-Since support.
+
 INSTALLATION
 
 To install this module type the following:
@@ -13,7 +21,6 @@ To install this module type the following:
 DEPENDENCIES
 
 This module requires these other modules and libraries:
-
 
     POE
     LWP

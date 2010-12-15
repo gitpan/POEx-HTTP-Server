@@ -15,6 +15,7 @@ t/11_request.t
 t/12_response.t
 t/20_poe.t
 t/25_keepalive.t
+t/26_prefork.t
 t/30_specials.t
 t/31_error.t
 t/Server.pm

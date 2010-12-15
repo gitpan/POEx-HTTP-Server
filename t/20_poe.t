@@ -83,7 +83,7 @@ like( $c, qr/POEx::HTTP::Server::Connection/,
 like( $c, qr/RESP=bless/, " ... with response" );
 like( $c, qr/POEx::HTTP::Server::Response/, " ... in the right class" );
 
-our( $REQ, $RESP );
+our( $PID, $REQ, $RESP );
 eval $c;
 
 is( $REQ->connection->remote_host, "127.0.0.1", " ... with remote IP" );
