@@ -1,4 +1,4 @@
-# $Id$
+# $Id: Response.pm 702 2010-12-15 20:06:31Z fil $
 # Copyright 2010 Philip Gwyn
 
 package POEx::HTTP::Server::Response;
@@ -43,9 +43,15 @@ sub sent
 sub done
 {
     my( $self ) = @_;
+    unless( $self->{__done} ) {
+        carp "Only call ", ref($self), "->done once";
+        return;
+    }
 
     $poe_kernel->post( @{ delete $self->{__done} } );
 }
+
+sub finished { not exists $_[0]->{__done} }
 
 #######################################
 # Send some data.  But not all the data
@@ -99,7 +105,8 @@ sub error
     my( $self, $rc, $text ) = @_;
 
     $self->code( $rc );
-    $self->content_type( 'text/plain' );
+    $self->content_type( 'text/plain' )
+        unless defined $self->content_type;
     $self->content( $text );
 
     $self->respond;
@@ -159,24 +166,12 @@ sub sendfile
         }
     }
 
-    # XXX - It would be nice to know the MTU
-    # Read the file
-    my $c = eval {
-            my $fh = IO::File->new;
-            $fh->open($file) or die "Unable to open $path: $!";
-            local $/;
-            my $c=<$fh>;
-            $fh->close;
-            return $c;
-        };
-    return $self->error(RC_INTERNAL_SERVER_ERROR, $@) if $@;
-
-    # Send the response
     $self->header( 'Content-Length' => $size );
-    $self->content( $c );
-    $self->respond;
-    $self->done;
+    $self->__fix_headers;
+
+    $poe_kernel->post( @{ $self->{__sendfile} }, $path, $file, $size );
 }
+
 
 1;
 
@@ -218,9 +213,10 @@ It is a sub-class of L<HTTP::Response> with the following additions:
 
     $req->done;
 
-Closes the connection.  Must be called after C<respond> or C<send>.  Having a
-seperate L<done> and <respond> means that you can do some post processing
-after the response was sent.
+Finishes the request.  If keep-alive isn't active, this will close the
+connection.  Must be called after C<respond> or C<send>.  Having a seperate
+L<done> and <respond> means that you can do some post processing after the
+response was sent.
 
     $resp->content( $HTML );
     $resp->respond;
@@ -231,30 +227,39 @@ after the response was sent.
 
 =head2 error
 
-    $req->error( $CODE, $TEXT );
+    $resp->error( $CODE, $TEXT );
 
-Returns an error message to the server.  
+Send C<$TEXT> as error message to the browser with status code of C<$CODE>.
+The default I<Content-Type> is I<text/plain>, but this may be overridden by
+setting the I<Content-Type> before hand.
 
+When L</error> is called, the response is sent to the browser
+(C<L</respond>>) and the request is finished (C<L</done>>).
+
+=head2 finished
+
+Flase; will be set to true if when L</done> is called.
 
 =head2 respond
 
-    $req->respond;
+    $resp->respond;
 
 Sends the response to the browser.  Sends headers if they aren't already
 sent.  No more content may be sent to the browser after this method call.
+L</done> must still be called to finish the request.
 
 =head2 send
 
-    $self->send( $CONTENT );
+    $resp->send( [$CONTENT] );
 
-Sends the response header (if not already sent) and C<$CONTENT> to the browser.
-The request is kept open and furthur calls to C<send> are allowed to send
-more content to the browser.
+Sends the response header (if not already sent) and C<$CONTENT> to the
+browser (if defiened). The request is kept open and furthur calls to C<send>
+are allowed to send more content to the browser.
 
 =head3 sendfile
 
-    $req->sendfile( $FILE );
-    $req->sendfile( $FILE, $CONTENT_TYPE );
+    $resp->sendfile( $FILE );
+    $resp->sendfile( $FILE, $CONTENT_TYPE );
 
 Sends the static file $FILE to the browser.  This method also deals with the
 requirements of C<HEAD> requests and C<If-Modified-Since> requests.
@@ -264,13 +269,14 @@ L<content_type> directly or by passing C<$CONTENT_TYPE> as a parameter. If
 the content-type hasn't already been selected, it defaults to
 C<application/octet-stream>.
 
-Currently does not use L<sendfile> but will at some point.
-
+If L<Sys::Sendfile> is installed, C<sendfile> is used to efficiently send
+the file over the socket.  Otherwise the file is sent in 
+L<POEx::HTTP::Server/blocksize> sized chunks.
 
 =head3 sent
 
-    unless( $req->sent ) {
-        $req->sent( 1 );
+    unless( $resp->sent ) {
+        $resp->sent( 1 );
         # ...
     }
 
@@ -278,15 +284,14 @@ Gets or sets the fact that a response header has already been sent.
 
 =head3 streaming
 
-    $req->streaming( 1 );
+    $resp->streaming( 1 );
 
-Turns on streaming mode for the socket.
+Turns on streaming mode for the socket.  L</send> does this also.
 
 
 =head1 SEE ALSO
 
 L<POEx::HTTP::Server>, L<POEx::HTTP::Server::Response>.
-
 
 =head1 AUTHOR
 

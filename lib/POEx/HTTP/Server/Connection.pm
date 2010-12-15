@@ -1,4 +1,4 @@
-# $Id$
+# $Id: Connection.pm 702 2010-12-15 20:06:31Z fil $
 # Copyright 2010 Philip Gwyn
 package POEx::HTTP::Server::Connection;
 
@@ -117,48 +117,48 @@ POEx::HTTP::Server::Connection - Object encapsulating an HTTP connection
 
 A unique ID for this browser connection.
 
-=head3 remote_addr
+=head2 remote_addr
 
-=head3 peeraddr
+=head2 peeraddr
 
 Return the address part of the sockaddr structure for the socket on
 the peer host.
 
-=head3 remote_host
+=head2 remote_host
 
-=head3 remote_ip
+=head2 remote_ip
 
-=head3 peerhost
+=head2 peerhost
 
 Return the address part of the sockaddr structure for the socket on
 the peer host in a text form xx.xx.xx.xx.
 
 
-=head3 remote_port
+=head2 remote_port
 
-=head3 peerport
+=head2 peerport
 
 Return the port number for the socket on the peer host.
 
 
-=head3 local_addr
+=head2 local_addr
 
-=head3 hostaddr
+=head2 hostaddr
 
 Return the port number that the socket is using on the local host.
 
-=head3 local_host
+=head2 local_host
 
-=head3 hosthost
+=head2 hosthost
 
-=head3 local_ip
+=head2 local_ip
 
 Return the local address part of the sockaddr structure for the socket in
 a text form xx.xx.xx.xx.
 
-=head3 local_port
+=head2 local_port
 
-=head3 hostport
+=head2 hostport
 
 Return the port number that the socket is using on the local host.
 

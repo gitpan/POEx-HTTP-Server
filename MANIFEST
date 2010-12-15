@@ -18,6 +18,7 @@ t/25_keepalive.t
 t/26_prefork.t
 t/30_specials.t
 t/31_error.t
+t/32_stream.t
 t/Server.pm
 t/something.txt
 eg/index.html

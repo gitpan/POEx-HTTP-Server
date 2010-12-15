@@ -1,5 +1,12 @@
 Revision history for Perl extension POEx::HTTP::Server.
 
+0.0500 Wed Dec 15, 2010
+    - Added streaming support
+    - Document and test above
+    - Added sendfile and blocksize
+    - Document and test above
+    - Improve documentation for ::Error, ::Response and ::Request.
+
 0.0400 Wed Dec 15, 2010
     - Document prefork
     - Created POEx::HTTP::Server::Base

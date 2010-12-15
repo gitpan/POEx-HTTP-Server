@@ -15,7 +15,7 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0400';
+our $VERSION = '0.0500';
 
 
 ##############################################################################
@@ -144,6 +144,9 @@ sub __init
         $self->{error}  = POEx::URI->new( delete $opt->{error} );
     }
 
+    $self->{blocksize} = delete $opt->{blocksize};
+    $self->{blocksize} ||= 5*1500;   # 10 ethernet frames
+
     $self->{keepalive} = delete $opt->{keepalive};
     if( defined $self->{keepalive} and $self->{keepalive} and
             $self->{keepalive} !~ /^\d+$/ ) {
@@ -165,7 +168,7 @@ sub __init
 #######################################
 sub __is_special    
 { 
-    $_[0] =~ /^(on_error|on_connect|on_disconnect|pre_request|post_request)$/;
+    $_[0] =~ /^(on_error|on_connect|on_disconnect|pre_request|stream_request|post_request)$/;
 }
 sub __init_handlers
 {
@@ -231,7 +234,9 @@ sub build_session
                                 ) ],
                             'POEx::HTTP::Server::Client' => [ 
                                 qw( input client_error timeout 
-                                    shutdown_client respond send flushed done
+                                    shutdown_client respond send 
+                                    sendfile_start
+                                    flushed done
                             ) ]
                       ],
                       args => [ $self ],
@@ -323,7 +328,7 @@ sub shutdown
     $self->D and warn "$$:$self->{name}: Shutdown";
     $poe_kernel->alias_remove( delete $self->{alias} ) if $self->{alias};
     foreach my $name ( keys %{ $self->{clients}||{} } ) {
-        $self->D and warn "$$:$self->{alias} shutdown client=$name";
+        $self->D and warn "$$:$self->{name}: shutdown client=$name";
         $poe_kernel->yield( evo $name => 'shutdown_client' );
     }
     $self->drop;
@@ -591,6 +596,7 @@ sub build_client
                     specials => dclone $self->{specials},
                     headers => $self->{headers},
                     error   => $self->{error},
+                    blocksize => $self->{blocksize},
                     keepalive => $self->{keepalive},
                     keepalivetimeout => $self->{keepalivetimeout},
                 );
@@ -618,6 +624,16 @@ use POE::Filter::Stream;
 use base qw( POEx::HTTP::Server::Base );
 
 use Data::Dump qw( pp );
+
+our $HAVE_SENDFILE;
+BEGIN {
+    unless( defined $HAVE_SENDFILE ) {
+        $HAVE_SENDFILE = 0;
+        eval "use Sys::Sendfile 0.11;";
+        warn $@ if $@;
+        $HAVE_SENDFILE = 1 unless $@;
+    }
+}
 
 #######################################
 sub new
@@ -663,6 +679,19 @@ sub build_connect
     my( $self, $socket ) = @_;
     $self->{connection} = 
                 POEx::HTTP::Server::Connection->new( $self->{name}, $socket );
+}
+
+
+sub build_response
+{
+    my( $self ) = @_;
+    my $resp = POEx::HTTP::Server::Response->new(RC_OK);
+    $resp->request( $self->{req} ) if $self->{req};
+    $resp->{__respond} = rsvp"respond";
+    $resp->{__send} = rsvp"send";
+    $resp->{__sendfile} = rsvp"sendfile_start";
+    $resp->{__done} = rsvp"done";
+    return $resp;
 }
 
 #######################################
@@ -729,14 +758,6 @@ sub drop
     delete $self->{resp};
 }
 
-sub flushed 
-{
-    my( $self ) = @_;
-    $self->{flushed} = 1;
-    $self->D and warn "$$:$self->{name}: Flushed";
-    $self->drop;
-    $self->close if $self->{will_close};
-}
 
 #######################################
 sub input
@@ -758,11 +779,7 @@ sub input
     $self->special_dispatch( 'pre_request', $req );
 
     # Build response
-    $self->{resp} = POEx::HTTP::Server::Response->new(RC_OK);
-    $self->{resp}->request( $self->{req} );
-    $self->{resp}->{__respond} = [ evs"respond" ];
-    $self->{resp}->{__send} = [ evs"send" ];
-    $self->{resp}->{__done} = [ evs"done" ];
+    $self->{resp} = $self->build_response;
 
     $self->{once} = 0;
     $self->{flushed} = 0;
@@ -780,6 +797,29 @@ sub input_error
     $self->{shutdown} = 1;
     $self->respond;
 }
+
+#######################################
+## POE::Wheel::ReadWrite is telling us that what we wrote has been written
+sub flushed 
+{
+    my( $self ) = @_;
+
+    $self->D and warn "$$:$self->{name}: Flushed";
+    
+    if( $self->{sendfile} ) {           # wrote a bit of a file
+        return $self->sendfile_next;    # send some more
+    }
+    if( $self->{resp} and $self->{resp}->streaming and 
+            not $self->{resp}->finished ) {     # streaming?
+        return $self->send_more;        # send some more
+    }
+
+    # Otherwise this means a request has finished
+    $self->{flushed} = 1;
+    $self->drop;
+    $self->close if $self->{will_close};
+}
+
 
 #######################################
 sub dispatch
@@ -837,19 +877,6 @@ sub send_headers
     $self->{resp}->sent( 1 );
 }
 
-#######################################
-sub send
-{
-    my( $self, $something ) = @_;
-    confess "Responding more then once to a request" unless $self->{resp};
-    unless( $self->{resp}->sent ) {
-        $self->should_close;
-        $self->send_headers;
-        $self->{wheel}->set_output_filter( $self->build_stream_filter );
-    }
-    $self->{wheel}->put( $something );
-    return;
-}
 
 
 #######################################
@@ -886,7 +913,7 @@ sub should_close
         #warn "$$:conn=$conn will_close=$self->{will_close}";
     }
 
-    $self->{will_close} = 0 if $self->{resp}->streaming;
+    $self->{will_close} = 1 if $self->{resp}->streaming;
     #warn "$$:post streaming will_close=$self->{will_close}";
     $self->{will_close} = 1 unless $self->{keepalive} > 1;
     #warn "$$:post keepalive will_close=$self->{will_close}";
@@ -896,9 +923,129 @@ sub should_close
 }
 
 #######################################
+sub send
+{
+    my( $self, $something ) = @_;
+    confess "Responding more then once to a request" unless $self->{resp};
+    unless( $self->{resp}->sent ) {
+        $self->should_close;
+        $self->send_headers;
+        $self->{wheel}->set_output_filter( $self->build_stream_filter );
+        if( $self->{resp}->streaming ) {
+            eval { $self->__tcp_hot };
+            warn $@ if $@;
+        }
+    }
+
+    $self->{wheel}->put( $something ) if defined $something;
+    if( $self->{resp}->streaming and $self->{wheel} ) {
+        $self->{wheel}->flush;
+            
+    }
+    return;
+}
+
+# We are in streaming mode.  The last chunk has flushed.  Send a new one
+sub send_more
+{
+    my( $self ) = @_;
+    $self->special_dispatch( 'stream_request', $self->{req}, $self->{resp} );
+}
+
+
+# We are in streaming mode.  Turn off Nagle's algorithm
+# This isn't as effective as you might think
+sub __tcp_hot
+{
+    my( $self ) = @_;
+    $self->D and 
+        warn "$$:$self->{name}: TCP_NODELAY";
+    my $h = $self->{wheel}->get_output_handle;
+    setsockopt($h, Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1) 
+        or die "setsockopt TCP_NODELAY: $!";
+    
+    # Note: On linux, even if we set the buffer size to 576, the minimum
+    # is 2048.  However, this still allows us to by-pass Nagle's algorithm.
+    setsockopt($h, Socket::SOL_SOCKET(), Socket::SO_SNDBUF(), 576)
+        or die "setsockopt SO_SNDBUF: $!";
+    
+    $self->D and warn "$$:$self->{name}: SO_SNDBUF=", unpack "i",
+                    getsockopt($h, Socket::SOL_SOCKET(), Socket::SO_SNDBUF());
+    
+}
+
+
+
+#######################################
+# Send an entire file
+# This is a callback from Response
+# $path is what should be reported in errors
+# $file is the full path to a readable file
+# $size is the amount of the file to send.  Should be entire file.
+sub sendfile_start
+{
+    my( $self, $path, $file, $size ) = @_;
+
+    die "Already sending a file" if $self->{sendfile};
+
+    $self->D and warn "$$:$self->{name}: sendfile path=$path size=$size";
+
+    # Open the file
+    my $fh = IO::File->new;
+    unless( $fh->open($file) ) {
+        $self->{resp}->error(RC_INTERNAL_SERVER_ERROR, "Unable to open $path: $!" );
+        return;
+    }
+
+    $self->{sendfile} = { offset=>0, size=>$size, fh=>$fh, 
+                          path=>$path, bs=>$self->{blocksize} };
+    $self->send;
+    # we wait for the 'flush' event to invoke sendfile.
+}
+
+sub sendfile_next
+{
+    my( $self ) = @_;
+
+    my $S = $self->{sendfile};
+    use bytes;
+
+    my $len;
+    if( $HAVE_SENDFILE ) {
+        $self->D and warn "$$:$self->{name}: sendfile path=$S->{path} offset=$S->{offset}";
+        my $socket = $self->{wheel}->get_output_handle;
+        $len = sendfile( $socket, $S->{fh}, 0, $S->{offset} );
+        unless( defined $len ) {
+            $self->net_error( 'sendfile', 0+$!, "$!" );
+            return;
+        }
+        poe->kernel->select_resume_write( $socket );
+    }
+    else {
+        $self->D and warn "$$:$self->{name}: sysread path=$S->{path} offset=$S->{offset}";
+        my $c = '';
+        $len = sysread( $S->{fh}, $c, $S->{bs} );
+        if( $len > 0 ) {
+            $self->D and warn "$$:$self->{name}: send bytes=".length $c;
+            $self->send( $c );
+        }
+    }
+    $S->{offset} += $len;
+    if( $S->{offset} >= $S->{size} ) {
+        $self->D and warn "$$:$self->{name}: sendfile done";
+        warn "Sendfile sent to many bytes!" if $S->{offset} > $S->{size};
+        $self->done;
+        delete $self->{sendfile};
+    }
+    return $len;
+}
+
+
+#######################################
 sub done
 {
     my( $self ) = @_;
+    $self->D and warn "$$:$self->{name}: Done";
     $self->special_dispatch( 'post_request', $self->{req}, $self->{resp} );
     $self->drop;
     $self->keepalive_start;
@@ -1029,6 +1176,8 @@ using Moose and not using the YELLING-STYLE of parameter passing.
 
 =head1 METHODS
 
+POEx::HTTP::Server has one public package method.
+
 =head2 spawn
 
     POEx::HTTP::Server->spawn( %CONFIG );
@@ -1092,6 +1241,17 @@ Syntatic sugar for
     POEx::HTTP::Server->spawn( alias => $ALIAS );
     
 Sets the server session's alias.  The alias defaults to 'HTTPd'.
+
+=head3 blocksize
+
+    POEx::HTTP::Server->spawn( blocksize => 5*$MTU );
+
+Sets the block size used when sending a file to the browser.  See
+L<POEx::HTTP::Server::Response/sendfile>.  See the L</Note about MTU>.
+
+Default value is 7500 octets, or 5 ethernet fames, assuming the standard
+ethernet MTU of 1500 octets.  This is useful for Interanet servers, or talking
+to a reverse proxy on the same LAN.
 
 =head3 concurrency
 
@@ -1173,21 +1333,28 @@ request object for details or parameters of the request.
     my $port = $conn->remote_port;
 
 The handler must populate the response object with necessary headers and
-content.  If the handler wishes to send an error to the browser, it may set
-the response code.  A default code of RC_OK (200) is used.  The response is
-the send to the browser with either C<respond> or C<send>.  When the handler
-is done, C<done> is called on the response object.
+content.  If the handler wishes to send an error to the browser, it should set
+the response code approriately.  A default HTTP status of RC_OK (200) is used.  The
+response is sent to the browser with either
+C<L<POEx::HTTP::Server::Response/respond>> or
+C<L<POEx::HTTP::Server::Response/send>>.  When the handler is finished, it
+calls C<L<POEx::HTTP::Server::Response/done>> on the response object.
 
+    # Generated content
     my $resp = $_[ARG1];
     $resp->content_type( 'text/plain' );
     $resp->content( "Hello world\n" );
     $resp->respond;
     $resp->done;
 
+    # HTTP redirect
     use HTTP::Status;
-    $resp->code( RC_FOUND );
+    $resp->code( RC_FOUND );    
     $resp->header( 'Location' => $new_uri );
+    $resp->respond;
+    $resp->done;
 
+    # Static file
     $resp->content_type( 'text/plain' );
     my $io = IO::File->new( $file );
     while( <$io> ) {
@@ -1195,7 +1362,7 @@ is done, C<done> is called on the response object.
     }
     $resp->done;
 
-The last example is silly.  It would be better to use C<sendfile> like so:
+The last example is silly.  It would be better to use L</sendfile> like so:
 
     $resp->content_type( 'image/gif' );
     $resp->sendfile( $file );
@@ -1223,7 +1390,8 @@ Here is an example of an unrolled loop:
         my $h = shift @{ $heap->{todo} };
         if( $h ) {
             # Send the content returned by event handlers in another session
-            $resp->send( $poe_kernel->call( $heap->{session}, $h, $req ) );
+            my $chunk = $poe_kernel->call( $heap->{session}, $h, $req )
+            $resp->send( $chunk );
             $poe_kernel->yeild( next_handler => $resp );
         }
         else {
@@ -1234,6 +1402,22 @@ Here is an example of an unrolled loop:
     sub last_handler {
         my( $heap, $resp ) = $_[HEAP,ARG0];
         $resp->done;
+    }
+
+    # Event handlers in the other session:
+    sub one {
+        # ....
+        return $chunk;
+    }
+
+    sub two {
+        # ....
+        return $chunk;
+    }
+
+    sub three {
+        # ....
+        return $chunk;
     }
 
 
@@ -1251,12 +1435,21 @@ C<ARG1> and C<ARG2> respectively.
     }
 
 
+=head2 Handler exceptions
+
+If a request handler invocations are wrapped in C<eval{}>.  If the handler
+throws an exception with C<die> this will be reported to the browser with a
+short message.  Obviously this only applies to the initial request handler. 
+If you call other event handlers, they will not report exceptions to the
+browser.
+
+
 =head2 Special handlers
 
 There are 5 special handlers that are invoked when a browser connection is opened and closed,
 before and after each request and when an error occurs.
 
-The note about L</handler parameters> also aplies to special handlers.
+The note about L</Handler parameters> also aplies to special handlers.
 
 =head3 on_connect
 
@@ -1273,7 +1466,7 @@ use this connection.
         # ...
     }
 
-It goes without saying that if you use L</keepalive> L</pre_request> will be
+It goes without saying that if you use L</keepalive>, L</pre_request> will be
 invoked more often then C<on_connect>.
 
 =head3 on_disconnect
@@ -1310,15 +1503,29 @@ C<ARG1> is a L<POEx::HTTP::Server::Response> object, with it's C<content> cleare
         # ...
     }
 
+=head3 stream_request
+
+Invoked when a chunk has been flushed if you are streaming a response to 
+the browser.  Streaming is turned on by calling
+L<POEx::HTTP::Server::Response/send> or by turning 
+L<POEx::HTTP::Server::Response/streaming> on.
+
+Please remember that while a chunk might be flushed, the OS's network layer
+might still decide to combine several chunks into a single packet.  And this
+even though we set TCP_NODELAY to 1 and SO_SNDBUF to 576.
+
 =head3 on_error
 
 Invoked when the server detects an error. C<ARG0> is a
-L<POEx::HTTP::Server::Error> object.  There are 2 types of errors: network
-errors and HTTP errors.  They are distiguished by calling the error object's
-C<op> method.  If C<op> returns undef(), it is an HTTP error, otherwise a
-network error.  HTTP error already has a message to the browser with HTML
-content. You may modify the HTTP error's content and headers before they get
-sent back to the browser.
+L<POEx::HTTP::Server::Error> object.  
+
+There are 2 types of errors: network errors and HTTP errors.  They are
+distiguished by calling the error object's C<op> method.  If C<op> returns
+C<undef()>, it is an HTTP error, otherwise a network error.  HTTP errors
+already have a message to the browser with HTML content. You may modify the
+HTTP error's content and headers before they get sent back to the browser.
+
+Unlike HTTP errors, network errors are never sent to the browser.
 
     POEx::HTTP::Server->spawn( 
                         handlers => { on_error => 'poe:my-session/error' }
@@ -1339,6 +1546,8 @@ sent back to the browser.
     
 =head1 EVENTS
 
+The following POE events may be used to control POEx::HTTP::Server.
+
 =head2 shutdown
 
     $poe_kernel->signal( $poe_kernel => 'shutdown' );
@@ -1356,9 +1565,9 @@ special handlers and the HTTP handlers.
 
 =head2 handlers_set
 
-    $poe_kernel->call( HTTPD => handlers_set => $URI );
-    $poe_kernel->call( HTTPD => handlers_set => $ARRAYREF );
-    $poe_kernel->call( HTTPD => handlers_set => $HASHREF );
+    $poe_kernel->post( HTTPD => handlers_set => $URI );
+    $poe_kernel->post( HTTPD => handlers_set => $ARRAYREF );
+    $poe_kernel->post( HTTPD => handlers_set => $HASHREF );
 
 Change all the handlers at once.  The sole parameter is the same as L</handlers>
 passed to L</spawn>.
@@ -1368,9 +1577,9 @@ new connections, not currently open connections.
 
 =head2 handlers_add
 
-    $poe_kernel->call( HTTPD => handlers_add => $URI );
-    $poe_kernel->call( HTTPD => handlers_add => $ARRAYREF );
-    $poe_kernel->call( HTTPD => handlers_add => $HASHREF );
+    $poe_kernel->post( HTTPD => handlers_add => $URI );
+    $poe_kernel->post( HTTPD => handlers_add => $ARRAYREF );
+    $poe_kernel->post( HTTPD => handlers_add => $HASHREF );
 
 Add new handlers to the server, overriding any that might already exist. 
 The ordering of handlers is preserved, with all new handlers added to the
@@ -1383,9 +1592,9 @@ new connections, not currently open connections.
 
 =head2 handlers_remove
 
-    $poe_kernel->call( HTTPD => handlers_remove => $RE );
-    $poe_kernel->call( HTTPD => handlers_remove => $ARRAYREF );
-    $poe_kernel->call( HTTPD => handlers_remove => $HASHREF );
+    $poe_kernel->post( HTTPD => handlers_remove => $RE );
+    $poe_kernel->post( HTTPD => handlers_remove => $ARRAYREF );
+    $poe_kernel->post( HTTPD => handlers_remove => $HASHREF );
 
 Remove one or more handlers from the server.  The handlers are removed based
 on the regex, not the handler's URI.  The regex must be exactly identical to
@@ -1395,20 +1604,20 @@ The sole parameter may be :
 
 =head3 $RE
 
-    $poe_kernel->call( HTTPD => handers_remove => '^/static' );
+    $poe_kernel->post( HTTPD => handers_remove => '^/static' );
 
 The handler associated with this regex is removed.  
 
 =head3 $ARRAYREF
 
-    $poe_kernel->call( HTTPD => handers_remove => 
+    $poe_kernel->post( HTTPD => handers_remove => 
                             [ '^/static', '^/static/bigger' ] );
 
 Remove a list of handlers associated.
 
 =head3 $HASHREF
 
-    $poe_kernel->call( HTTPD => handers_remove => 
+    $poe_kernel->post( HTTPD => handers_remove => 
                             { '^/static' => 1, '^/static/bigger' => 1 } );
 
 The hash's keys are a list of regexes to remove.  The values are ignored.
@@ -1417,7 +1626,10 @@ Note that modifying the set of handlers will not modify the handlers for
 currently open connections.
 
 
-=head1 SEND HEADERS
+
+=head1 NOTES
+
+=head2 Sending headers
 
 If you wish to send the headers right away, but send the body later, you may do:
 
@@ -1432,16 +1644,49 @@ When you are finished:
 
     $resp->done;
 
-=head1 STREAMING
+=head2 Streaming
 
-Streaming is very similar to sending the headers and body seperately.  See above.
-One difference is that you will want to be advised when a block has been sent.
-This needs B<TO BE WRITEN>.
+Streaming is very similar to sending the headers and body seperately.  See
+above.  Look for C<L</post_request>> to find out when the last block has been
+sent to the browser.
+
+    $resp->streaming( 1 );
+    $resp->header( 'Content-Length' => $size );
+    $resp->send;
+
+When you want to send a chunk:
+
+    $resp->send( $chunk );
+
+This can be repeated as long as you want.
+
+When you are finished:
+
+    $resp->done;
+
+This will provoke a L</post_request> when the last chunk is flushed.
+
+
+=head2 blocksize and MTU
+
+If you are using sendfile, but do not have L<Sys::Sendfile> installed you
+really should set L</blocksize> to a whole multiple of the interface's MTU. 
+Doing so automatically is currently beyond the scope of this module.  Please
+see L<Net::Interface/mtu>. But that won't help for servers available over
+the the Internet; your local ethernet interface's MTU (1500) is probably
+greater then your internet connection's MTU (1400-1492 for DSL).  What's
+more, the MTU could be as low as 576.
+
+
 
 
 =head1 SEE ALSO
 
-L<POE>
+L<POE>, 
+L<POEx::HTTP::Server::Request>,
+L<POEx::HTTP::Server::Response>,
+L<POEx::HTTP::Server::Error>,
+L<POEx::HTTP::Server::Connection>,
 
 =head1 AUTHOR
 

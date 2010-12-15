@@ -1,4 +1,4 @@
-# $Id$
+# $Id: Request.pm 702 2010-12-15 20:06:31Z fil $
 # Copyright 2010 Philip Gwyn
 
 package POEx::HTTP::Server::Request;

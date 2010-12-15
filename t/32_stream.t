@@ -12,6 +12,7 @@ use IO::Socket::INET;
 use POE;
 use POEx::HTTP::Server;
 use URI;
+use URI::QueryParam;
 
 eval "use LWP::UserAgent";
 if( $@ ) {
@@ -19,7 +20,7 @@ if( $@ ) {
     exit 0;
 }
 
-plan tests => 5;
+plan tests => 36;
 
 my $sock = IO::Socket::INET->new( LocalAddr => 0, Listen => 1, ReuseAddr => 1 );
 
@@ -30,51 +31,21 @@ DEBUG and
 undef( $sock );
 
 ###############################################
-# $DB::fork_TTY='/dev/pts/4';
 my $pid = open( CHILD, "-|" );
 defined($pid) or die "Unable to fork: $!";
 unless( $pid ) {    # child
     $poe_kernel->has_forked;
-    # Give a slice to the server
-    diag( "Sleep 1" ); sleep 1;
+    diag( "Sleep 1" );
+    sleep 1;
     my $UA = LWP::UserAgent->new;
     $UA->agent("$0/0.1 " . $UA->agent);
 
-    my( $req, $resp );
-
-
-    ##### Open a socket, send no request
-    # This is a tad bogus; it will not provoke an on_error.
-    # But it does make sure nothing explodes.
-    $sock = IO::Socket::INET->new( PeerAddr=>'127.0.0.1', 
-                                   PeerPort => $uri->port, 
-                                   Blocking => 1 );
-    $sock or die $@;
-    undef( $sock );
-
-
-    ##### Open a socket, send a bogus request
-    $sock = IO::Socket::INET->new( PeerAddr=>'127.0.0.1', PeerPort => $uri->port, Blocking => 1 );
-    $sock or die $@;
-    $sock->printflush( "BOGUSREQUEST\n\n" );
-    undef( $sock );
-
-    ##### Open a socket, send a request without content
-    $sock = IO::Socket::INET->new( PeerAddr=>'127.0.0.1', PeerPort => $uri->port, Blocking => 1 );
-    $sock or die $@;
-    $sock->printflush( <<HTTP );
-GET / HTTP/1.1
-Server: $0/0.1
-Content-Encoding: fragged
-Host: localhost
-
-HTTP
-    diag( "Sleep 1" ); sleep 1;
-
-    # Make sure we get HTML back
-    $resp = do { local $/; <$sock> };
-    die "Wrong status\n$resp" unless $resp =~ m(411 Length);
-    die "Not HTML\n$resp" unless $resp =~ m(<html>);
+    ##### Stream 20 blocks
+    $uri->query_form( N=>10 );
+    my $req = HTTP::Request->new( GET => $uri );
+    my $resp = $UA->request( $req );
+    my $c = $resp->content;
+    die $c unless $c =~ m(1/10) and $c=~ m(10/10);
 
     ##### Shut down the server
     $uri->path( '/shutdown' );
@@ -91,9 +62,8 @@ my $heap = { alias => 'worker', pid => $pid };
 POE::Session->create(
         heap   => $heap,
         package_states => [
-            Worker => [ qw( _start _stop shutdown  pid
-                            req error 
-                            connect disconnect pre post ) ],
+            Worker => [ qw( _start _stop shutdown pid
+                            req stream ) ],
         ]
     );
 
@@ -102,8 +72,8 @@ POEx::HTTP::Server->spawn(
         options => { debug => ::DEBUG, trace => 0 },
         headers => { Server => "$0/0.1" },
         handlers => [
-                    ''              => 'poe:worker/req',
-                    'on_error'      => 'poe:worker/error',
+                    ''               => 'poe:worker/req',
+                    'stream_request' => 'poe:worker/stream'
                 ]
     );
 
@@ -115,13 +85,13 @@ while(<CHILD>) {
 }
     
 
+
 ################################################################################
 package Worker;
 
 use strict;
 use warnings;
 use Test::More;
-use Data::Dump qw( pp );
 use POE;
 
 #######################################
@@ -163,58 +133,42 @@ sub req
     if( $req->uri->path =~ /shutdown/ ) {
         $poe_kernel->signal( $poe_kernel, 'shutdown' );
         $resp->content( 'OK' );
+        $resp->content_type( 'text/plain' );
+        $resp->respond;
+        $resp->done;
+        return;
     }
-    else {
-        fail( "No good requests!" );
 
-        $resp->content( "hello world" );
-    }
-    $resp->content_type( 'text/plain' );
-    $resp->respond;
-    $resp->done;
-}
+    isa_ok( $req, 'POEx::HTTP::Server::Request' );
+    isa_ok( $req->connection, 'POEx::HTTP::Server::Connection' );
+    isa_ok( $resp, 'POEx::HTTP::Server::Response' );
 
-sub error 
-{
-    my( $heap, $err ) = @_[ HEAP, ARG0 ];
+    my $uri = $req->uri;
+    isa_ok( $uri, 'URI' );
+    my $N = $uri->query_param( 'N' );
+    die "N must be set in ", pp $uri unless $N;
+    ok( $N > 0, "$N must be greater then 0" );
 
-    isa_ok( $err, 'POEx::HTTP::Server::Error' );
-    if( $err->op ) {
-        diag( $err->content );
-    }
-    else {
-        ok( $err->is_error, " ... is an error" );
-        # warn pp $err;
-    }
+    $resp->streaming( 1 );
+
+    $heap->{N} = 0;
+    $heap->{max} = $N;
+    $resp->send;
 }
 
 #######################################
-sub connect
-{
-    my( $heap, $conn ) = @_[ HEAP, ARG0 ];
-    push @{ $heap->{special} }, 'on_connect';
-    isa_ok( $conn, 'POEx::HTTP::Server::Connection' );
-    $heap->{ID} = $conn->ID;
-}
-
-sub disconnect
-{
-    my( $heap, $conn ) = @_[ HEAP, ARG0 ];
-    push @{ $heap->{special} }, 'on_disconnect';
-    isa_ok( $conn, 'POEx::HTTP::Server::Connection' );
-    is( $conn->ID, $heap->{ID}, " ... same one" );
-}
-
-#######################################
-sub pre
-{
-    my( $heap, $req ) = @_[ HEAP, ARG0 ];
-    fail( "No requests" );
-}
-
-sub post
+sub stream
 {
     my( $heap, $req, $resp ) = @_[ HEAP, ARG0, ARG1 ];
-    fail( "No requests" );
+    
+    isa_ok( $req, 'POEx::HTTP::Server::Request' );
+    isa_ok( $req->connection, 'POEx::HTTP::Server::Connection' );
+    isa_ok( $resp, 'POEx::HTTP::Server::Response' );
+    ::DEBUG and warn "N=$heap->{N} max=$heap->{max}";
+    $heap->{N}++;
+    $resp->send( "$heap->{N}/$heap->{max}\n" );
+    if( $heap->{N} >= $heap->{max} ) {
+        ::DEBUG and warn "DONE";
+        $resp->done;
+    }
 }
-

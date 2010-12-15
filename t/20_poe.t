@@ -9,8 +9,10 @@ use Test::More;
 
 use Data::Dump qw( pp );
 use IO::Socket::INET;
+BEGIN { $POEx::HTTP::Server::Client::HAVE_SENDFILE = 0; }
 use POEx::HTTP::Server;
 use URI;
+
 
 use t::Server;
 
@@ -37,6 +39,8 @@ DEBUG and
     diag "Listen on $uri";
 
 undef( $sock );
+
+# $DB::fork_TTY = '/dev/pts/4';
 
 ###############################################3
 my $pid = open( CHILD, "-|" );

@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               POEx-HTTP-Server
-version:            0.0400
+version:            0.0500
 abstract:           POE HTTP server
 author:
     - Philip Gwyn <fil@localdomain>

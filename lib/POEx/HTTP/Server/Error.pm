@@ -1,4 +1,4 @@
-# $Id$
+# $Id: Error.pm 702 2010-12-15 20:06:31Z fil $
 # Copyright 2010 Philip Gwyn
 
 package POEx::HTTP::Server::Error;
@@ -53,25 +53,51 @@ POEx::HTTP::Server::Error - Object encapsulating an error
 
 =head1 DESCRIPTION
 
-It is a sub-class of L<HTTP::Request>.
+This object encapsulates a network error or an HTTP error for reporting
+to L<POEx::HTTP::Server/on_error> special handlers.
 
+Network errors are those reported by L<POE::Wheel::SocketFactory>,
+L<POE::Wheel::ReadWrite> and L<Sys::Sendfile/sendfile> if that is used.
+
+HTTP errors are those reported by L<POE::Filter::HTTPD> when it detects a
+mal-formed header or errors internal to L<POEx::HTTP::Server>.  However
+errors reported with L<POEx::HTTP::Server::Response/error> do not invoke
+C<on_error> and so are not HTTP errors.
+
+HTTP errors are nearly always sent to the browser.  You may modify the
+L<HTTP::Response/content> or prevent them being sent by setting
+L<POEx::HTTP::Server::Response/sent>.
+
+HTTP errors will always close the connection, even if keep-alive is set.
 
 =head1 METHODS
 
+As this is a sub-class of L<POEx::HTTP::Server::Response>, it all that class's
+methods are available.  Note, however, that
+L<POEx::HTTP::Server::Response/request> might be C<undef>.
 
 =head2 op
 
+Returns the name of the operation that failed.
+Can be one of C<read>, C<write>, C<bind> or C<sendfile>.
+
 =head2 errnum
+
+Returns the system error number; the numeric value of $!.
 
 =head2 errstr
 
+Returns the system error string; the string value of $!.
+
 =head2 errstring
+
+Same as L</errstr>.
 
 =head1 SEE ALSO
 
 L<POEx::HTTP::Server>, 
-L<POEx::HTTP::Server::Request>, 
-L<HTTP::Request>.
+L<POEx::HTTP::Server::Response>, 
+L<HTTP::Response>.
 
 
 =head1 AUTHOR
