@@ -40,7 +40,7 @@ sub spawn
             keepalive => $KA,
             prefork => $prefork,
             alias => 'web-server',
-            options => { debug => ::DEBUG, trace => 0 },
+            options => { debug => ::DEBUG, trace => 0, default => 0 },
             headers => { Server => "$0/0.1" },
             handlers => [
                     '^/$'       => 'poe:worker1/root',

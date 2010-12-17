@@ -15,7 +15,9 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0500';
+our $VERSION = '0.0600';
+
+sub DEBUG () { 0 }
 
 
 ##############################################################################
@@ -28,13 +30,49 @@ use warnings;
 use POE;
 use POE::Session::PlainCall;
 use HTTP::Status;
+use Carp;
+use Carp::Heavy;
 
 use Data::Dump qw( pp );
+
+BEGIN { *DEBUG = \&POEx::HTTP::Server::DEBUG }
 
 # Virtual methods
 sub _psm_begin { die "OVERLOAD ME" }
 sub _psm_end   { return }
+sub _stop { return }
+sub error { return }
+sub shutdown { return }
 
+
+#######################################
+# record the current running state
+sub state
+{
+    my( $self, $state ) = @_;
+    my $rv = $self->{state};
+    if( 2==@_ ) {
+        $self->{state} = $state;
+        $self->{S} = { $state => 1 };
+    }
+    return $rv;
+}
+
+#######################################
+sub D
+{
+    my $self = shift;
+    my $prefix = "$$:$self->{name}:";
+    $prefix .= "$self->{state}:" if $self->{state};
+    my $msg = join '', @_;
+    $msg =~ s/^/$prefix /m;
+    $DB::single = 1;
+    unless( $msg =~ /\n$/ ) {
+        my %i = Carp::caller_info(0);
+        $msg .= " at $i{file} line $i{line}\n";
+    }
+    print STDERR $msg;
+}
 
 #######################################
 # Dispatch a call to a special handler
@@ -52,8 +90,8 @@ sub special_dispatch
 sub invoke
 {
     my( $self, $re, $handler, @args ) = @_;
-    $self->D and warn "$$:$self->{name}: Invoke handler for '$re' ($handler)";
-    eval { poe->kernel->call( @$handler, @args ) };
+    DEBUG and $self->D( "Invoke handler for '$re' ($handler)" );
+    eval { $poe_kernel->call( @$handler, @args ) };
     if( $@ ) {
         warn $@;
         if( $self->{resp} ) {
@@ -68,16 +106,27 @@ sub net_error
     my( $self, $op, $errnum, $errstr ) = @_;
     unless( $self->{specials}{on_error} ) {
         # skip out early
-        warn "$$:$self->{name}: $op error ($errnum) $errstr";
+        $self->D( "$op error ($errnum) $errstr" );
         return;
     }
 
-    $self->D and warn "$$:$self->{name}: $op error ($errnum) $errstr";
+    DEBUG and $self->D( "$op error ($errnum) $errstr" );
 
     my $err = POEx::HTTP::Server->build_error;
     $err->details( $op, $errnum, $errstr );        
     $self->special_dispatch( on_error => $err );
 }
+
+
+
+
+
+
+
+
+
+
+
 
 ##############################################################################
 package POEx::HTTP::Server;
@@ -100,10 +149,9 @@ sub new
     my( $package, %options ) = @_;
     my $self = bless {}, $package;
     $self->__init( \%options );
+    $self->state( 'new' );
     return $self;
 }
-
-sub D () { $_[0]->{options}{debug} }
 
 #######################################
 sub __init
@@ -224,17 +272,18 @@ sub build_session
                       options => $self->{options}, 
                       package_states => [
                             'POEx::HTTP::Server::Base' =>
-                                [ qw( _psm_begin ) ],
+                                [ qw( _psm_begin _stop 
+                                      error shutdown ) ],
                             $package => [ 
-                                qw( _start shutdown build_server
-                                    accept error retry close
+                                qw( _start build_server
+                                    accept retry close
                                     handlers_get handlers_add handlers_remove
                                     prefork_child prefork_accept 
                                     prefork_parent prefork_shutdown
                                 ) ],
                             'POEx::HTTP::Server::Client' => [ 
-                                qw( input client_error timeout 
-                                    shutdown_client respond send 
+                                qw( input timeout 
+                                    respond send 
                                     sendfile_start
                                     flushed done
                             ) ]
@@ -263,9 +312,9 @@ sub build_error
 sub build_server
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: build_server";
+    DEBUG and $self->D( "build_server" );
     my %invoke = $self->build_handle;
-    $self->D and warn "$$:$self->{name}: ", pp \%invoke;
+    DEBUG and $self->D( pp \%invoke );
     $self->{server} = POE::Wheel::SocketFactory->new(
             %invoke,
             SuccessEvent => ev 'accept',
@@ -277,7 +326,7 @@ sub build_server
 sub drop
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: drop";
+    DEBUG and $self->D( "drop" );
     delete $self->{server};
     return;
 }
@@ -287,7 +336,7 @@ sub drop
 sub _start
 {
     my( $package, $self ) = @_;
-    $self->D and warn "$$:$self->{name}: _start";
+    DEBUG and $self->D( "_start" );
     $poe_kernel->alias_set( $self->{alias} );
     poe->session->object( HTTPd => $self );
     return;
@@ -296,7 +345,8 @@ sub _start
 sub _psm_begin
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: setup";
+    DEBUG and $self->D( "setup" );
+    $self->state( 'listen' );
     $poe_kernel->sig( shutdown => ev"shutdown" );
     $self->build_server;
     if( $self->{prefork} ) {
@@ -308,7 +358,7 @@ sub _psm_begin
 sub done
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: done";
+    DEBUG and $self->D( "done" );
     poe->session->object_unregister( 'HTTPd' );
 }
 
@@ -318,18 +368,19 @@ sub _stop
 {
     my( $package ) = @_;
     my $self = poe->heap->{O};
-    $self->D and warn "$$:$self->{name}: _stop";
+    DEBUG and $self->D( "_stop" );
 }
 
 #######################################
 sub shutdown
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: Shutdown";
+    $self->state( 'shutdown' );
+    DEBUG and $self->D( "Shutdown" );
     $poe_kernel->alias_remove( delete $self->{alias} ) if $self->{alias};
     foreach my $name ( keys %{ $self->{clients}||{} } ) {
-        $self->D and warn "$$:$self->{name}: shutdown client=$name";
-        $poe_kernel->yield( evo $name => 'shutdown_client' );
+        DEBUG and $self->D( "shutdown client=$name" );
+        $poe_kernel->yield( evo $name => 'shutdown' );
     }
     $self->drop;
 }
@@ -339,7 +390,9 @@ sub accept
 {
     my( $self, $socket, $peer ) = @_;
     
-    $self->D and warn "$$:$self->{name}: accept";
+    DEBUG and $self->D( "accept" );
+    $self->state( 'accept' );
+
     my $obj = $self->build_client( $self->{N}++, $socket );
     poe->session->object( $obj->name, $obj );
     $obj->build_wheel( $socket );
@@ -348,12 +401,13 @@ sub accept
     $self->{clients}{$obj->name} = 1;
 
     $self->prefork_accepted;
+    $self->state( 'listen' );
 }
 
 sub close
 {
     my( $self, $name ) = @_;
-    $self->D and warn "$$:$self->{name}: close $name";
+    DEBUG and $self->D( "close $name" );
 
     $self->concurrency_down;
     delete $self->{clients}{$name};
@@ -372,7 +426,7 @@ sub concurrency_up
     return unless $self->{concurrency} > 0;
     return if $self->{prefork};
     if( $self->{C} >= $self->{concurrency} ) {
-        $self->D and warn "$$:$self->{name}: pause_accept C=$self->{C}";
+        DEBUG and $self->D( "pause_accept C=$self->{C}" );
         $self->{server}->pause_accept;
         $self->{paused} = 1;
     }
@@ -386,7 +440,7 @@ sub concurrency_down
     return if $self->{prefork};
     unless( $self->{C} >= $self->{concurrency} and $self->{paused} ) {
         if( $self->{server} ) {
-            $self->D and warn "$$:$self->{name}: resume_accept C=$self->{C}";
+            DEBUG and $self->D( "resume_accept C=$self->{C}" );
             $self->{server}->resume_accept;
         }
         $self->{paused} = 0;
@@ -409,8 +463,8 @@ sub retry
 {
     my( $self ) = @_;
     return unless $self->{retry};
-    my $tid = poe->kernel->delay_set( ev"do_retry" => $self->{retry} );
-    $self->D and warn "$$:$self->{name}: Retry in $self->{retry} seconds.  tid=$tid.";
+    my $tid = $poe_kernel->delay_set( ev"do_retry" => $self->{retry} );
+    DEBUG and $self->D( "Retry in $self->{retry} seconds.  tid=$tid." );
     return $tid;
 }
 
@@ -418,7 +472,7 @@ sub retry
 sub do_retry
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: do_retry";
+    DEBUG and $self->D( "do_retry" );
     $self->build_server;
 }
 
@@ -507,20 +561,20 @@ sub __init_prefork
 {
     my( $self ) = @_;
     return unless $self->{prefork};
-    $self->D and warn "$$:$self->{name}: __init_prefork";
+    DEBUG and $self->D( "__init_prefork" );
 
     $self->{parent} = 1;
-    poe->kernel->sig( daemon_child => ev 'prefork_child' );
-    poe->kernel->sig( daemon_parent => ev 'prefork_parent' );
-    poe->kernel->sig( daemon_accept => ev 'prefork_accept' );
-    poe->kernel->sig( daemon_shutdown => ev 'prefork_shutdown' );
+    $poe_kernel->sig( daemon_child => ev 'prefork_child' );
+    $poe_kernel->sig( daemon_parent => ev 'prefork_parent' );
+    $poe_kernel->sig( daemon_accept => ev 'prefork_accept' );
+    $poe_kernel->sig( daemon_shutdown => ev 'prefork_shutdown' );
 }
 
 #######################################
 sub prefork
 {
     my( $package, $status ) = @_;
-    poe->kernel->post( Daemon => update_status => $status );
+    $poe_kernel->post( Daemon => update_status => $status );
 }
 
 #######################################
@@ -528,7 +582,7 @@ sub prefork
 sub prefork_child
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: prefork_child";
+    DEBUG and $self->D( "prefork_child" );
     delete $self->{parent};
     $self->prefork( 'wait' );
 }
@@ -538,7 +592,7 @@ sub prefork_child
 sub prefork_accept
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: prefork_accept";
+    DEBUG and $self->D( "prefork_accept" );
     $self->{server}->resume_accept;
 }
 
@@ -547,7 +601,7 @@ sub prefork_accept
 sub prefork_accepted
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: prefork_accepted";
+    DEBUG and $self->D( "prefork_accepted" );
     return unless $self->{prefork};
     $self->prefork( 'req' );
     $self->{server}->pause_accept unless $self->{concurrency} > 0;
@@ -558,7 +612,7 @@ sub prefork_accepted
 sub prefork_close
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: prefork_close";
+    DEBUG and $self->D( "prefork_close" );
     return unless $self->{prefork};
     $self->prefork( 'done' );
 }
@@ -568,7 +622,7 @@ sub prefork_close
 sub prefork_parent 
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: prefork_parent";
+    DEBUG and $self->D( "prefork_parent" );
     $self->{parent} = $$;
 }
 
@@ -576,7 +630,7 @@ sub prefork_parent
 sub prefork_shutdown
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: prefork_shutdown";
+    DEBUG and $self->D( "prefork_shutdown" );
     $self->shutdown;
 }
 
@@ -590,7 +644,6 @@ sub build_client
                     __close => ev"close",
                     alias => $self->{alias}, 
                     name  => $name, 
-                    debug => $self->{options}{debug},
                     todo  => $self->{todo},
                     handlers => dclone $self->{handlers},
                     specials => dclone $self->{specials},
@@ -625,6 +678,8 @@ use base qw( POEx::HTTP::Server::Base );
 
 use Data::Dump qw( pp );
 
+BEGIN { *DEBUG = \&POEx::HTTP::Server::DEBUG }
+
 our $HAVE_SENDFILE;
 BEGIN {
     unless( defined $HAVE_SENDFILE ) {
@@ -641,12 +696,12 @@ sub new
     my( $package, %param ) = @_;
 
     my $self = bless { %param }, $package;
+    $self->state( 'waiting' );
     $self->build_connect( delete $self->{socket} );
     return $self;
 
 }
 
-sub D () { $_[0]->{debug} }
 sub name () { $_[0]->{name} }
 
 #######################################
@@ -715,12 +770,13 @@ sub on_disconnect
 }
 
 #######################################
-sub client_error
+sub error
 {
     my( $self, $op, $errnum, $errstr, $id ) = @_;
+
     if( $op eq 'read' and $errnum == 0 ) {  
         # this is a normal error
-        $self->D and warn "$$:$self->{name}: $op error ($errnum) $errstr";
+        DEBUG and $self->D( "$op error ($errnum) $errstr" );
     }
     else {
         $self->net_error( $op, $errnum, $errstr );
@@ -732,9 +788,9 @@ sub client_error
 sub close
 {
     my( $self ) = @_;
-    $self->{will_close} = 0;
-    $self->D and warn "$$:$self->{name}: Close";
-    poe->kernel->yield( $self->{__close}, $self->name );
+    $self->state( 'closing' );
+    DEBUG and $self->D( "Close" );
+    $poe_kernel->yield( $self->{__close}, $self->name );
     poe->session->object_unregister( $self->{name} );
     $self->on_disconnect;
     $self->close_connection;
@@ -744,8 +800,9 @@ sub close
 sub close_connection
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: close_connection";
-    delete $self->{connection};
+    DEBUG and $self->D( "close_connection" );
+    my $C = delete $self->{connection};
+    $C->{aborted} = 1;
     my $W = delete $self->{wheel};
     $W->DESTROY if $W;
     return;
@@ -763,9 +820,16 @@ sub drop
 sub input
 {
     my( $self, $req ) = @_;
+
+    $self->state( 'handling' );
     $self->keepalive_stop;
 
-    die "New request while a request is pending ", pp $req if $self->{req};
+    if( $self->{req} ) {
+        warn "New request while we still have a request";
+        $self->pending_push( $req );
+        return;
+    }
+
     if ( $req->isa("HTTP::Response") ) {
         $self->input_error( $req );
         return;
@@ -781,8 +845,7 @@ sub input
     # Build response
     $self->{resp} = $self->build_response;
 
-    $self->{once} = 0;
-    $self->{flushed} = 0;
+    $self->reset_req;
 
     $self->dispatch;
 }
@@ -790,12 +853,29 @@ sub input
 sub input_error
 {
     my( $self, $resp ) = @_;
-    $self->D and warn "$$:$self->{name}: ERROR ", $resp->status_line;
+    DEBUG and $self->D( "ERROR ", $resp->status_line );
     bless $resp, 'POEx::HTTP::Server::Error';
     $self->special_dispatch( on_error => $resp );
     $self->{resp} = $resp;
     $self->{shutdown} = 1;
     $self->respond;
+}
+
+sub reset_req
+{
+    my( $self ) = @_;
+    $self->{will_close} = 0;
+    $self->{once} = 0;
+    $self->{flushing} = 0;
+}
+
+#######################################
+sub output
+{
+    my( $self, $something ) = @_;
+
+    $self->{wheel}->put( $something );
+    $self->{flushing} = 1;
 }
 
 #######################################
@@ -804,21 +884,50 @@ sub flushed
 {
     my( $self ) = @_;
 
-    $self->D and warn "$$:$self->{name}: Flushed";
+    $self->{flushing} = 0;
+    DEBUG and $self->D( "Flushed" );
     
-    if( $self->{sendfile} ) {           # wrote a bit of a file
+    # wrote a bit of a file
+    if( $self->{sendfile} ) {           
         return $self->sendfile_next;    # send some more
     }
-    if( $self->{resp} and $self->{resp}->streaming and 
-            not $self->{resp}->finished ) {     # streaming?
+
+    # Request has finished
+    if( not $self->{resp} or $self->{S}{done} or $self->{resp}->finished ) {
+        return $self->finish_request;
+    }
+
+    # streaming?
+    elsif( $self->{resp}->streaming ) {     
         return $self->send_more;        # send some more
     }
 
-    # Otherwise this means a request has finished
-    $self->{flushed} = 1;
-    $self->drop;
-    $self->close if $self->{will_close};
+    # The last possiblity is that calls to ->send have filled up the Wheel's
+    # or the driver's buffer and it was flushed.
 }
+
+
+
+
+#######################################
+# Clean up after a request
+sub finish_request
+{
+    my( $self ) = @_;
+    $self->state( 'done' );
+    DEBUG and $self->D( 'finish_request' );
+    $self->keepalive_start;
+
+    # next 3 MUST be in this order if we want post_request to always come 
+    # before on_disconnect (which is posted from ->close()) 
+    $self->special_dispatch( 'post_request', $self->{req}, $self->{resp} );
+    $self->close if $self->{will_close};
+    $self->drop;
+    $self->pending_next;
+}
+
+
+
 
 
 #######################################
@@ -841,7 +950,7 @@ sub dispatch
 sub find_handler
 {
     my( $self, $path ) = @_;
-    $self->D and warn "$$:$self->{name}: Request for $path";
+    DEBUG and $self->D( "Request for $path" );
     foreach my $re ( @{ $self->{todo} } ) {
         next unless $re eq '' or $path =~ /$re/;
         return( $re, $self->{handlers}{$re} );
@@ -854,11 +963,11 @@ sub respond
 {
     my( $self ) = @_;
 
-    $self->D and warn "$$:$self->{name}: respond";
-    confess "Responding more then once to a request" if $self->{once};
-    $self->{once}++;
+    DEBUG and $self->D( "respond" );
+    # XXX - make this next bit a POE-croak
+    confess "Responding more then once to a request" if $self->{once}++;
 
-    unless( $self->{resp}->sent ) {
+    unless( $self->{resp}->headers_sent ) {
         $self->should_close;
         $self->send_headers;
     }
@@ -871,10 +980,10 @@ sub send_headers
 {
     my( $self ) = @_;
 
-    $self->D and warn "$$:$self->{name}: Response: ".$self->{resp}->status_line;
+    DEBUG and $self->D( "Response: ".$self->{resp}->status_line );
     $self->__fix_headers;
-    $self->{wheel}->put( $self->{resp} );
-    $self->{resp}->sent( 1 );
+    $self->output( $self->{resp} );
+    $self->{resp}->headers_sent( 1 );
 }
 
 
@@ -886,6 +995,14 @@ sub __fix_headers
     while( my( $h, $v ) = each %{$self->{headers}} ) {
         next if $self->{resp}->header( $h );
         $self->{resp}->header( $h => $v);
+    }
+
+    # Tell the browser the connection should close
+    if( $self->{will_close} and $self->{req} and $self->{req}->protocol eq 'HTTP/1.1' ) {
+        my $c = $self->{resp}->header( 'Connection' );
+        if( $c ) { $c .= ",close" }
+        else { $c = 'close' }
+        $self->{resp}->header( 'Connection', $c );
     }
 }
 
@@ -918,7 +1035,7 @@ sub should_close
     $self->{will_close} = 1 unless $self->{keepalive} > 1;
     #warn "$$:post keepalive will_close=$self->{will_close}";
     $self->{will_close} = 1 if $self->{shutdown};
-    $self->D and warn "$$:$self->{name}: should_close = $self->{will_close}";
+    DEBUG and $self->D( "will_close=$self->{will_close}" );
     return $self->{will_close};
 }
 
@@ -927,20 +1044,22 @@ sub send
 {
     my( $self, $something ) = @_;
     confess "Responding more then once to a request" unless $self->{resp};
-    unless( $self->{resp}->sent ) {
+    unless( $self->{resp}->headers_sent ) {
         $self->should_close;
         $self->send_headers;
         $self->{wheel}->set_output_filter( $self->build_stream_filter );
         if( $self->{resp}->streaming ) {
-            eval { $self->__tcp_hot };
+            eval { 
+                $SIG{__DIE__} = 'DEFAULT'; 
+                $self->__tcp_hot;
+            };
             warn $@ if $@;
         }
     }
 
-    $self->{wheel}->put( $something ) if defined $something;
+    $self->output( $something ) if defined $something;
     if( $self->{resp}->streaming and $self->{wheel} ) {
-        $self->{wheel}->flush;
-            
+        $self->{wheel}->flush;            
     }
     return;
 }
@@ -958,8 +1077,8 @@ sub send_more
 sub __tcp_hot
 {
     my( $self ) = @_;
-    $self->D and 
-        warn "$$:$self->{name}: TCP_NODELAY";
+    DEBUG and 
+        $self->D( "TCP_NODELAY" );
     my $h = $self->{wheel}->get_output_handle;
     setsockopt($h, Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1) 
         or die "setsockopt TCP_NODELAY: $!";
@@ -969,12 +1088,21 @@ sub __tcp_hot
     setsockopt($h, Socket::SOL_SOCKET(), Socket::SO_SNDBUF(), 576)
         or die "setsockopt SO_SNDBUF: $!";
     
-    $self->D and warn "$$:$self->{name}: SO_SNDBUF=", unpack "i",
-                    getsockopt($h, Socket::SOL_SOCKET(), Socket::SO_SNDBUF());
+    DEBUG and $self->D( "SO_SNDBUF=", unpack "i",
+                    getsockopt($h, Socket::SOL_SOCKET(), Socket::SO_SNDBUF()));
     
 }
 
-
+sub __tcp_sndbuf
+{
+    my( $self ) = @_;
+    my $h = $self->{wheel}->get_output_handle;
+    my $bs = eval {
+            $SIG{__DIE__} = 'DEFAULT';
+            return unpack "i", getsockopt($h, Socket::SOL_SOCKET(), Socket::SO_SNDBUF());
+        };
+    return $bs;
+}
 
 #######################################
 # Send an entire file
@@ -988,7 +1116,7 @@ sub sendfile_start
 
     die "Already sending a file" if $self->{sendfile};
 
-    $self->D and warn "$$:$self->{name}: sendfile path=$path size=$size";
+    DEBUG and $self->D( "sendfile path=$path size=$size" );
 
     # Open the file
     my $fh = IO::File->new;
@@ -1012,28 +1140,28 @@ sub sendfile_next
 
     my $len;
     if( $HAVE_SENDFILE ) {
-        $self->D and warn "$$:$self->{name}: sendfile path=$S->{path} offset=$S->{offset}";
+        DEBUG and $self->D( "sendfile path=$S->{path} offset=$S->{offset}" );
         my $socket = $self->{wheel}->get_output_handle;
         $len = sendfile( $socket, $S->{fh}, 0, $S->{offset} );
         unless( defined $len ) {
             $self->net_error( 'sendfile', 0+$!, "$!" );
             return;
         }
-        poe->kernel->select_resume_write( $socket );
+        $poe_kernel->select_resume_write( $socket );
     }
     else {
-        $self->D and warn "$$:$self->{name}: sysread path=$S->{path} offset=$S->{offset}";
+        DEBUG and $self->D( "sysread path=$S->{path} offset=$S->{offset}" );
         my $c = '';
         $len = sysread( $S->{fh}, $c, $S->{bs} );
         if( $len > 0 ) {
-            $self->D and warn "$$:$self->{name}: send bytes=".length $c;
+            DEBUG and $self->D( "send bytes=".length $c );
             $self->send( $c );
         }
     }
     $S->{offset} += $len;
     if( $S->{offset} >= $S->{size} ) {
-        $self->D and warn "$$:$self->{name}: sendfile done";
-        warn "Sendfile sent to many bytes!" if $S->{offset} > $S->{size};
+        DEBUG and $self->D( "sendfile done" );
+        $self->D( "Sendfile sent to many bytes!" ) if $S->{offset} > $S->{size};
         $self->done;
         delete $self->{sendfile};
     }
@@ -1045,10 +1173,11 @@ sub sendfile_next
 sub done
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: Done";
-    $self->special_dispatch( 'post_request', $self->{req}, $self->{resp} );
-    $self->drop;
-    $self->keepalive_start;
+    $self->state( 'done' );
+    DEBUG and $self->D( "Done" );
+    unless( $self->{flushing} ) {
+        $self->finish_request;
+    }
 }
 
 #######################################
@@ -1058,12 +1187,13 @@ sub keepalive_start
     return if $self->{will_close};
     $self->{keepalive}--;
     return unless $self->{keepalive} > 0;
-    $self->D and warn "$$:$self->{name}: keep-alive=$self->{keepalive}";
-    $self->D and warn "$$:$self->{name}: keep-alive timeout=$self->{keepalivetimeout}";
-    $self->{TID} = poe->kernel->delay_set( ev"timeout", 
+    DEBUG and $self->D( "keep-alive=$self->{keepalive}" );
+    DEBUG and $self->D( "keep-alive timeout=$self->{keepalivetimeout}" );
+    $self->{TID} = $poe_kernel->delay_set( ev"timeout", 
                                                $self->{keepalivetimeout} 
                                              );
-    $self->D and warn "$$:$self->{name}: keep-alive start tid=$self->{TID}";
+    DEBUG and $self->D( "keep-alive start tid=$self->{TID}" );
+    $self->state( 'waiting' );
 }
 
 sub timeout
@@ -1078,19 +1208,59 @@ sub keepalive_stop
 {
     my( $self ) = @_;
     return unless $self->{TID};
-    $self->D and warn "$$:$self->{name}: keep-alive stop tid=$self->{TID}";
-    poe->kernel->alarm_remove( delete $self->{TID} );
+    DEBUG and $self->D( "keep-alive stop tid=$self->{TID}" );
+    $poe_kernel->alarm_remove( delete $self->{TID} );
 }
 
 #######################################
-sub shutdown_client
+sub shutdown
 {
     my( $self ) = @_;
-    $self->D and warn "$$:$self->{name}: shutdown_client";
+    $self->state( 'shutdown' );
+    DEBUG and $self->D( "shutdown" );
     $self->{shutdown} = 1;
     $self->{will_close} = 1;
-    $self->close if $self->{flushed};
+    $self->close unless $self->{flushing};
     $self->keepalive_stop;
+}
+
+
+#######################################
+sub pending_push
+{
+    my( $self, $req ) = @_;
+    push @{ $self->{pending} }, $req;
+}
+
+
+#######################################
+sub pending_next
+{
+    my( $self ) = @_;
+    return unless $self->{pending} and @{ $self->{pending} };
+    if( $self->{S}{shutdown} or $self->{S}{closing} ) {
+        $self->D( "We are closing down with pending requests" );
+        $self->pending_reply;
+        return;
+    }
+    my $next = shift @{ $self->{pending} };
+    return unless $next;
+
+    $self->input( $next );
+}
+
+#######################################
+sub pending_reply
+{
+    my( $self ) = @_;
+    return unless $self->{wheel};
+    foreach my $req ( @{ $self->{pending} } ) {
+        my $resp = $self->build_error_response( RC_SERVICE_UNAVAILABLE, 
+                                                "This request could not be handled." );
+        $self->{wheel}->put( $resp );
+        last unless $self->{wheel}
+    }
+    $self->{wheel}->flush() if $self->{wheel};
 }
 
 
@@ -1290,8 +1460,7 @@ By default, the C<Server> header is set.
 
     POEx::HTTP::Server->spawn( options => $HASHREF );
 
-Options passed L<POE::Session>->create.  You may also specify C<debug> to 
-turn on some debugging output.
+Options passed L<POE::Session>->create.  
 
 =head3 prefork
 
@@ -1634,7 +1803,10 @@ currently open connections.
 If you wish to send the headers right away, but send the body later, you may do:
 
     $resp->header( 'Content-Length' => $size );
-    $resp->send;
+    $resp->send;    
+
+The above causes the headers to be sent, allong with any content you might
+have added to C<$resp>.
 
 When you want to send the body:
 
@@ -1647,8 +1819,12 @@ When you are finished:
 =head2 Streaming
 
 Streaming is very similar to sending the headers and body seperately.  See
-above.  Look for C<L</post_request>> to find out when the last block has been
-sent to the browser.
+above.  One difference is that the headers will be flushed and the socket
+will be set to I<hot> with TCP_NODELAY and SO_SNBUF.  Another difference is that
+keepalive is deactivated for the connection.  Finally difference
+is that you will see C<L</stream_request>> when you are allowed to send the
+next block. Look for C<L</post_request>> to find out when the last block has
+been sent to the browser.
 
     $resp->streaming( 1 );
     $resp->header( 'Content-Length' => $size );

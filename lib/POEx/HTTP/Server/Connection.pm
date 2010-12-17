@@ -1,4 +1,4 @@
-# $Id: Connection.pm 702 2010-12-15 20:06:31Z fil $
+# $Id: Connection.pm 716 2010-12-17 16:29:05Z fil $
 # Copyright 2010 Philip Gwyn
 package POEx::HTTP::Server::Connection;
 
@@ -70,7 +70,7 @@ sub authtype {
 }
  
 sub aborted {
-    return 0;
+    return $_[0]->{aborted};
 }
  
 sub fileno {

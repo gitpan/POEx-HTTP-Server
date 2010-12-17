@@ -16,9 +16,9 @@ is( $resp->streaming, undef(), "Streaming isn't set" );
 is( $resp->streaming(1), undef(), "Streaming wasn't set" );
 is( $resp->streaming, 1, "Streaming is set" );
 
-is( $resp->sent, undef(), "Header not sent" );
-is( $resp->sent(1), undef(), "Header wasn't sent" );
-is( $resp->sent, 1, "Header is sent" );
+is( $resp->headers_sent, undef(), "Header not sent" );
+is( $resp->headers_sent(1), undef(), "Header wasn't sent" );
+is( $resp->headers_sent, 1, "Header is sent" );
 
 my $req = POEx::HTTP::Server::Request->new( GET => "/honk/bonk.html" );
 $req->protocol( 'HTTP/1.1' );
@@ -28,7 +28,7 @@ is( $resp->request, undef(), "No request" );
 $resp->request( $req );
 ok( $resp->request, "Request set" );
 
-$resp->sent( 0 );
+$resp->headers_sent( 0 );
 $resp->streaming( 0 );
 ok( !$resp->protocol, "No protocol specified" );
 $resp->__fix_headers;

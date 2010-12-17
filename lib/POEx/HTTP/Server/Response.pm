@@ -1,4 +1,4 @@
-# $Id: Response.pm 702 2010-12-15 20:06:31Z fil $
+# $Id: Response.pm 716 2010-12-17 16:29:05Z fil $
 # Copyright 2010 Philip Gwyn
 
 package POEx::HTTP::Server::Response;
@@ -30,11 +30,11 @@ sub streaming
 
 #######################################
 # Get/set if the response header has been sent or not
-sub sent
+sub headers_sent
 {
     my $self = shift;
-    my $rv = $self->{__sent};
-    if (@_) { $self->{__sent} = !!$_[0] }
+    my $rv = $self->{__headers_sent};
+    if (@_) { $self->{__headers_sent} = !!$_[0] }
     return $rv;
 }
 
@@ -77,7 +77,7 @@ sub respond
 sub __fix_headers
 {
     my( $self ) = @_;
-    return if $self->sent;
+    return if $self->headers_sent;
     my $req = $self->request;
 
     unless( $self->protocol ) {
@@ -273,10 +273,10 @@ If L<Sys::Sendfile> is installed, C<sendfile> is used to efficiently send
 the file over the socket.  Otherwise the file is sent in 
 L<POEx::HTTP::Server/blocksize> sized chunks.
 
-=head3 sent
+=head3 headers_sent
 
-    unless( $resp->sent ) {
-        $resp->sent( 1 );
+    unless( $resp->headers_sent ) {
+        $resp->headers_sent( 1 );
         # ...
     }
 

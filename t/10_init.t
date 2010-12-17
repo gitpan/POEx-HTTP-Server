@@ -4,12 +4,12 @@ use strict;
 use warnings;
 
 use Data::Dump qw( pp );
-use Test::More tests => 45;
+use Test::More tests => 44;
 BEGIN { 
     use_ok('POEx::HTTP::Server');
 }
 
-my $W = POEx::HTTP::Server->new( options => { debug => 1 },
+my $W = POEx::HTTP::Server->new( options => {},
                                  inet => {
                                         LocalPort => 808
                                     },
@@ -17,8 +17,8 @@ my $W = POEx::HTTP::Server->new( options => { debug => 1 },
                                 );
 isa_ok( $W, 'POEx::HTTP::Server' );
 is( $W->{alias}, 'HTTPd', " ... default alias" );
-ok( $W->D, " ... debugging on" );
-is_deeply( $W->{headers}, { Server => 'POEx::HTTP::Server/0.0500'}, 
+# ok( $W->D, " ... debugging on" );
+is_deeply( $W->{headers}, { Server => 'POEx::HTTP::Server/0.0600'}, 
                     " ... default headers" );
 is_deeply( $W->{inet}, { Listen=>1, BindPort=>808, Reuse=>1 }, 
                 " ... correct Inet" ) or warn pp $W->{inet};

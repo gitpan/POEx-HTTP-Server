@@ -1,5 +1,10 @@
 Revision history for Perl extension POEx::HTTP::Server.
 
+0.0600 Fri Dec 17, 2010
+    - Removed debug option.  
+    - Fixed the race condition between send/flushed and done
+    - Renamed Response->sent to ->headers_sent
+
 0.0500 Wed Dec 15, 2010
     - Added streaming support
     - Document and test above
