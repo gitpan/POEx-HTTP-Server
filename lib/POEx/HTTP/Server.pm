@@ -15,7 +15,7 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0600';
+our $VERSION = '0.0700';
 
 sub DEBUG () { 0 }
 
@@ -197,13 +197,21 @@ sub __init
 
     $self->{keepalive} = delete $opt->{keepalive};
     if( defined $self->{keepalive} and $self->{keepalive} and
-            $self->{keepalive} !~ /^\d+$/ ) {
-        $self->{keepalive} = 5;
+            ( $self->{keepalive} !~ /^\d+$/ or $self->{keepalive} == 1) ) {
+        # Apache 1 default
+        #$self->{keepalive} = 15;
+        # Apache 2 default
+        $self->{keepalive} = 100;
     }
     $self->{keepalive} ||= 0;
+    # warn "keepalive=$self->{keepalive}";
+
     $self->{keepalivetimeout} = delete $opt->{keepalivetimeout};
     if( not defined $self->{keepalivetimeout} and $self->{keepalive} ) {
-        $self->{keepalivetimeout} = 15;
+        # Apache 1 default
+        #$self->{keepalivetimeout} = 15;
+        # Apache 2 default
+        $self->{keepalivetimeout} = 5;
     }
 
 #    if( $self->{concurrency} > 0 and $self->{prefork} ) {
@@ -399,7 +407,7 @@ sub accept
 
     $self->concurrency_up;
     $self->{clients}{$obj->name} = 1;
-
+    DEBUG and $self->D( "accept ".$obj->name );
     $self->prefork_accepted;
     $self->state( 'listen' );
 }
@@ -407,12 +415,16 @@ sub accept
 sub close
 {
     my( $self, $name ) = @_;
-    DEBUG and $self->D( "close $name" );
+    DEBUG and 
+        $self->D( "close $name" );
 
     $self->concurrency_down;
     delete $self->{clients}{$name};
 
-    $self->prefork_close;
+    # Only close if we really are closed...
+    if( $self->{C} == 0 ) {
+        $self->prefork_close;
+    }
 
     unless( $self->{C} > 0 or $self->{server} ) {
         $self->done;
@@ -424,7 +436,6 @@ sub concurrency_up
     my( $self ) = @_;
     $self->{C}++;
     return unless $self->{concurrency} > 0;
-    return if $self->{prefork};
     if( $self->{C} >= $self->{concurrency} ) {
         DEBUG and $self->D( "pause_accept C=$self->{C}" );
         $self->{server}->pause_accept;
@@ -437,7 +448,6 @@ sub concurrency_down
     my( $self ) = @_;
     $self->{C}--;
     return unless $self->{concurrency} > 0;
-    return if $self->{prefork};
     unless( $self->{C} >= $self->{concurrency} and $self->{paused} ) {
         if( $self->{server} ) {
             DEBUG and $self->D( "resume_accept C=$self->{C}" );
@@ -574,7 +584,7 @@ sub __init_prefork
 sub prefork
 {
     my( $package, $status ) = @_;
-    $poe_kernel->post( Daemon => update_status => $status );
+    $poe_kernel->call( Daemon => update_status => $status );
 }
 
 #######################################
@@ -592,8 +602,9 @@ sub prefork_child
 sub prefork_accept
 {
     my( $self ) = @_;
-    DEBUG and $self->D( "prefork_accept" );
-    $self->{server}->resume_accept;
+    DEBUG and 
+        $self->D( "prefork_accept" );
+    $self->{server}->resume_accept unless $self->{resume_once}++;
 }
 
 #######################################
@@ -604,7 +615,7 @@ sub prefork_accepted
     DEBUG and $self->D( "prefork_accepted" );
     return unless $self->{prefork};
     $self->prefork( 'req' );
-    $self->{server}->pause_accept unless $self->{concurrency} > 0;
+    # $self->{server}->pause_accept unless $self->{concurrency} > 1;
 }
 
 #######################################
@@ -612,7 +623,8 @@ sub prefork_accepted
 sub prefork_close
 {
     my( $self ) = @_;
-    DEBUG and $self->D( "prefork_close" );
+    DEBUG and 
+        $self->D( "prefork_close" );
     return unless $self->{prefork};
     $self->prefork( 'done' );
 }
@@ -630,7 +642,8 @@ sub prefork_parent
 sub prefork_shutdown
 {
     my( $self ) = @_;
-    DEBUG and $self->D( "prefork_shutdown" );
+    DEBUG and 
+        $self->D( "prefork_shutdown" );
     $self->shutdown;
 }
 
@@ -684,7 +697,9 @@ our $HAVE_SENDFILE;
 BEGIN {
     unless( defined $HAVE_SENDFILE ) {
         $HAVE_SENDFILE = 0;
-        eval "use Sys::Sendfile 0.11;";
+        eval "
+            use Sys::Sendfile 0.11;
+        ";
         warn $@ if $@;
         $HAVE_SENDFILE = 1 unless $@;
     }
@@ -820,8 +835,10 @@ sub drop
 sub input
 {
     my( $self, $req ) = @_;
+    DEBUG and $self->D( "input" );
 
     $self->state( 'handling' );
+
     $self->keepalive_stop;
 
     if( $self->{req} ) {
@@ -864,6 +881,11 @@ sub input_error
 sub reset_req
 {
     my( $self ) = @_;
+    
+    if( delete $self->{stream_wheel} ) {
+        # Second request on a keep-alive wheel.  Switch back to Filter::HTTPD
+        $self->{wheel}->set_output_filter( $self->build_filter );
+    }
     $self->{will_close} = 0;
     $self->{once} = 0;
     $self->{flushing} = 0;
@@ -874,8 +896,8 @@ sub output
 {
     my( $self, $something ) = @_;
 
-    $self->{wheel}->put( $something );
     $self->{flushing} = 1;
+    $self->{wheel}->put( $something );
 }
 
 #######################################
@@ -1035,7 +1057,8 @@ sub should_close
     $self->{will_close} = 1 unless $self->{keepalive} > 1;
     #warn "$$:post keepalive will_close=$self->{will_close}";
     $self->{will_close} = 1 if $self->{shutdown};
-    DEBUG and $self->D( "will_close=$self->{will_close}" );
+    DEBUG and 
+        $self->D( "will_close=$self->{will_close}" );
     return $self->{will_close};
 }
 
@@ -1043,10 +1066,12 @@ sub should_close
 sub send
 {
     my( $self, $something ) = @_;
+    DEBUG and $self->D("send");
     confess "Responding more then once to a request" unless $self->{resp};
     unless( $self->{resp}->headers_sent ) {
         $self->should_close;
         $self->send_headers;
+        $self->{stream_wheel} = 1;
         $self->{wheel}->set_output_filter( $self->build_stream_filter );
         if( $self->{resp}->streaming ) {
             eval { 
@@ -1184,10 +1209,12 @@ sub done
 sub keepalive_start
 {
     my( $self ) = @_;
+    # $self->D( "will_close=$self->{will_close} keepalive=$self->{keepalive}" );
     return if $self->{will_close};
     $self->{keepalive}--;
     return unless $self->{keepalive} > 0;
-    DEBUG and $self->D( "keep-alive=$self->{keepalive}" );
+    DEBUG and 
+            $self->D( "keep-alive=$self->{keepalive}" );
     DEBUG and $self->D( "keep-alive timeout=$self->{keepalivetimeout}" );
     $self->{TID} = $poe_kernel->delay_set( ev"timeout", 
                                                $self->{keepalivetimeout} 
@@ -1216,11 +1243,13 @@ sub keepalive_stop
 sub shutdown
 {
     my( $self ) = @_;
-    $self->state( 'shutdown' );
-    DEBUG and $self->D( "shutdown" );
+    my $state = $self->state( 'shutdown' );
+    DEBUG and $self->D( "shutdown flushing=$self->{flushing} state=$state" );
     $self->{shutdown} = 1;
     $self->{will_close} = 1;
-    $self->close unless $self->{flushing};
+    # If we are handling a request or flushing it's output, we wait
+    # until that's completed
+    $self->close unless $self->{flushing} or $state eq 'handling';
     $self->keepalive_stop;
 }
 
@@ -1404,7 +1433,7 @@ See L</HANDLERS> below.
 
 Syntatic sugar for
 
-    POEx::HTTP::Server->spawn( handler => [ '' => $uri ] );
+    POEx::HTTP::Server->spawn( handlers => [ '' => $uri ] );
 
 =head3 alias
 
@@ -1451,10 +1480,26 @@ By default, the C<Server> header is set.
 
     POEx::HTTP::Server->spawn( keepalive => $N );
 
+Activates the HTTP/1.0 Keep-Alive extension and HTTP/1.1 persistent
+connection feature if true.  Deactivates keep-alive if false.
+
+Default is 0 (off).
+
+If C<$N> is a number, then it is used as the maximum number of requests
+per connection.
+
+If C<$N> isn't a number, or is simply C<1>, then the default 100.
+
+B<Note> that HTTP/1.0 Keep-Alive extension is not currently not supported
+
 =head3 keepalivetimeout
 
     POEx::HTTP::Server->spawn( keepalivetimeout => $TIME );
 
+Sets the number of seconds to wait for a subsequent request before closing a
+connection.
+
+Defaults to 5 seconds.
 
 =head3 options
 
@@ -1503,8 +1548,8 @@ request object for details or parameters of the request.
 
 The handler must populate the response object with necessary headers and
 content.  If the handler wishes to send an error to the browser, it should set
-the response code approriately.  A default HTTP status of RC_OK (200) is used.  The
-response is sent to the browser with either
+the response code approriately.  A default HTTP status of RC_OK (200) is used.  
+The response is sent to the browser with either
 C<L<POEx::HTTP::Server::Response/respond>> or
 C<L<POEx::HTTP::Server::Response/send>>.  When the handler is finished, it
 calls C<L<POEx::HTTP::Server::Response/done>> on the response object.
@@ -1606,26 +1651,26 @@ C<ARG1> and C<ARG2> respectively.
 
 =head2 Handler exceptions
 
-If a request handler invocations are wrapped in C<eval{}>.  If the handler
-throws an exception with C<die> this will be reported to the browser with a
-short message.  Obviously this only applies to the initial request handler. 
-If you call other event handlers, they will not report exceptions to the
-browser.
+Request handler invocations are wrapped in C<eval{}>.  If the handler throws
+an exception with C<die> this will be reported to the browser as a short
+message.  Obviously this only applies to the initial request handler.  If
+you yield to other POE event handlers, they will not report exceptions to
+the browser.
 
 
 =head2 Special handlers
 
-There are 5 special handlers that are invoked when a browser connection is opened and closed,
-before and after each request and when an error occurs.
+There are 5 special handlers that are invoked when a browser connection is
+opened and closed, before and after each request and when an error occurs.
 
 The note about L</Handler parameters> also aplies to special handlers.
 
 =head3 on_connect
 
 Invoked when a new connection is made to the server.  C<ARG0> is a
-L<POEx::HTTP::Server::Connection> object that may be queried for
-information. This connection object is shared by all requests objects that
-use this connection.  
+L<POEx::HTTP::Server::Connection> object that may be queried for information
+about the connection. This connection object will be shared by all requests
+objects that use this connection.
 
     POEx::HTTP::Server->spawn( 
                         handlers => { on_connect => 'poe:my-session/on_connect' }
@@ -1635,8 +1680,8 @@ use this connection.
         # ...
     }
 
-It goes without saying that if you use L</keepalive>, L</pre_request> will be
-invoked more often then C<on_connect>.
+If you use L</keepalive>, L</pre_request> will be invoked more often then
+C<on_connect>.
 
 =head3 on_disconnect
 
@@ -1661,7 +1706,8 @@ C<ARG0> is a L<POEx::HTTP::Server::Request> object.  There is no C<ARG1>.
 
 Invoked after a response has been sent to the browser.  
 C<ARG0> is a L<POEx::HTTP::Server::Request> object.  
-C<ARG1> is a L<POEx::HTTP::Server::Response> object, with it's C<content> cleared.
+C<ARG1> is a L<POEx::HTTP::Server::Response> object, with 
+it's C<content> cleared.
 
     POEx::HTTP::Server->spawn( 
                         handlers => { pre_request => 'poe:my-session/post' }
@@ -1674,10 +1720,9 @@ C<ARG1> is a L<POEx::HTTP::Server::Response> object, with it's C<content> cleare
 
 =head3 stream_request
 
-Invoked when a chunk has been flushed if you are streaming a response to 
-the browser.  Streaming is turned on by calling
-L<POEx::HTTP::Server::Response/send> or by turning 
-L<POEx::HTTP::Server::Response/streaming> on.
+Invoked when a chunk has been flushed to the OS, if you are streaming a
+response to the browser.  Streaming is turned on with
+L<POEx::HTTP::Server::Response/streaming>.
 
 Please remember that while a chunk might be flushed, the OS's network layer
 might still decide to combine several chunks into a single packet.  And this
@@ -1688,7 +1733,7 @@ even though we set TCP_NODELAY to 1 and SO_SNDBUF to 576.
 Invoked when the server detects an error. C<ARG0> is a
 L<POEx::HTTP::Server::Error> object.  
 
-There are 2 types of errors: network errors and HTTP errors.  They are
+There are 2 types of errors: network errors and HTTP errors.  They may be
 distiguished by calling the error object's C<op> method.  If C<op> returns
 C<undef()>, it is an HTTP error, otherwise a network error.  HTTP errors
 already have a message to the browser with HTML content. You may modify the
@@ -1722,8 +1767,10 @@ The following POE events may be used to control POEx::HTTP::Server.
     $poe_kernel->signal( $poe_kernel => 'shutdown' );
     $poe_kernel->post( HTTPd => 'shutdown' );
 
-Initiate server shutdown.  Note however that any pending requests will stay 
-active.  The session will exit when the last of the requests has exited.
+Initiate server shutdown.  Any pending requests will stay active, however. 
+The session will exit when the last of the requests has finished.
+No further requests will be accepted on the conntection, even if keepalive
+is used.
 
 =head2 handlers_get
 

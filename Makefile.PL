@@ -7,7 +7,7 @@ WriteMakefile(
     VERSION_FROM      => 'lib/POEx/HTTP/Server.pm', # finds $VERSION
     PREREQ_PM         => {
             'POE'           => 1,
-            'POEx::URI'     => 0.03,
+            'POEx::URI'     => 0.0301,
             'POE::Session::Multiplex' => 0.0501,
             'POE::Session::PlainCall' => 0.02,
             'Data::Dump'    => 1,

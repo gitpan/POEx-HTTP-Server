@@ -1,4 +1,4 @@
-# $Id: Response.pm 716 2010-12-17 16:29:05Z fil $
+# $Id: Response.pm 745 2011-02-18 02:35:18Z fil $
 # Copyright 2010 Philip Gwyn
 
 package POEx::HTTP::Server::Response;
@@ -119,9 +119,8 @@ sub error
 sub sendfile
 {
     my( $self, $file, $ct ) = @_;
-    $ct ||= 'application/octet-stream';
 
-    DEBUG and warn "file=$file ct=$ct";
+    DEBUG and warn "file=$file";
 
     my $path = $self->request->uri ?
                $self->request->uri->path : basename $file;
@@ -141,7 +140,11 @@ sub sendfile
 
     # some required headers
     $self->header( 'Last-Modified' => time2str( $lastmod ) );
-    $self->content_type($ct) unless defined $self->content_type;
+    unless( defined $self->content_type ) {
+        $ct ||= 'application/octet-stream';
+        DEBUG and warn "ct=$ct";
+        $self->content_type( $ct );
+    }
 
     # Bail early for HEAD requests
     if ( $self->request->method eq 'HEAD' and $size ) {

@@ -1,5 +1,17 @@
 Revision history for Perl extension POEx::HTTP::Server.
 
+0.0700 Fri Feb 18, 2011
+    - Better keepalive params.  Documented, no less.
+    - Rebuild the filter for Keep-alive
+    - Only tell PoCo::Daemon we closed only when we really close a connection
+    - Don't close the connection on daemon_shutdown if we are handling a request
+    - Use ->call to inform PoCo::Daemon
+    - Fixed concurrency
+    - Make Sys::Sendfile visible to PAR
+    - Fixed content-type handling for ->sendfile
+    - Tweak doco
+    - Require latest POEx::URI
+
 0.0600 Fri Dec 17, 2010
     - Removed debug option.  
     - Fixed the race condition between send/flushed and done
