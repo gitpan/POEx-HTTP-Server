@@ -18,7 +18,7 @@ my $W = POEx::HTTP::Server->new( options => {},
 isa_ok( $W, 'POEx::HTTP::Server' );
 is( $W->{alias}, 'HTTPd', " ... default alias" );
 # ok( $W->D, " ... debugging on" );
-is_deeply( $W->{headers}, { Server => 'POEx::HTTP::Server/0.0700'}, 
+is_deeply( $W->{headers}, { Server => 'POEx::HTTP::Server/0.0800'}, 
                     " ... default headers" );
 is_deeply( $W->{inet}, { Listen=>1, BindPort=>808, Reuse=>1 }, 
                 " ... correct Inet" ) or warn pp $W->{inet};

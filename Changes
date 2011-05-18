@@ -1,5 +1,10 @@
 Revision history for Perl extension POEx::HTTP::Server.
 
+0.0800 Wed May 18, 2011
+    - Bump copyrights
+    - Don't warn if Sys::Sendfile is missing
+    - Confirmed working in POE 1.311
+
 0.0700 Fri Feb 18, 2011
     - Better keepalive params.  Documented, no less.
     - Rebuild the filter for Keep-alive

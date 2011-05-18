@@ -15,7 +15,7 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0700';
+our $VERSION = '0.0800';
 
 sub DEBUG () { 0 }
 
@@ -700,7 +700,7 @@ BEGIN {
         eval "
             use Sys::Sendfile 0.11;
         ";
-        warn $@ if $@;
+        # warn $@ if $@;
         $HAVE_SENDFILE = 1 unless $@;
     }
 }
@@ -1917,7 +1917,7 @@ Philip Gwyn, E<lt>gwyn -at- cpan.orgE<gt>
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2010 by Philip Gwyn
+Copyright (C) 2010, 2011 by Philip Gwyn.  All rights reserved.
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.8.8 or,
