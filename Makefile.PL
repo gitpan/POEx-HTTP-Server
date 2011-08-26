@@ -8,8 +8,8 @@ WriteMakefile(
     PREREQ_PM         => {
             'POE'           => 1,
             'POEx::URI'     => 0.0301,
-            'POE::Session::Multiplex' => 0.0501,
-            'POE::Session::PlainCall' => 0.02,
+            'POE::Session::Multiplex' => 0.0600,
+            'POE::Session::PlainCall' => 0.0300,
             'Data::Dump'    => 1,
             'Scalar::Util'  => 0,
             'Storable'      => 1,

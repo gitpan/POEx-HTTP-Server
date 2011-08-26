@@ -10,6 +10,7 @@ use Test::More;
 use Data::Dump qw( pp );
 use IO::Socket::INET;
 use POEx::HTTP::Server;
+use POSIX qw( SIGUSR1 );
 use URI;
 
 use t::Server;
@@ -111,7 +112,7 @@ while( <CHILD> ) {
 #####
 END {
     if( $pid ) {
-        kill 10, $pid;
+        kill SIGUSR1, $pid;
         DEBUG and diag "PID=$pid";
         my $kid = waitpid( $pid, 0 );
         is( $?, 0, "Sane exit" );

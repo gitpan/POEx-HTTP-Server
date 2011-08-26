@@ -15,7 +15,7 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0800';
+our $VERSION = '0.0801';
 
 sub DEBUG () { 0 }
 
@@ -107,6 +107,7 @@ sub net_error
     unless( $self->{specials}{on_error} ) {
         # skip out early
         $self->D( "$op error ($errnum) $errstr" );
+        die "$$: Failed to bind\n" if $op eq 'bind' and $errnum == 98;
         return;
     }
 
@@ -398,6 +399,7 @@ sub accept
 {
     my( $self, $socket, $peer ) = @_;
     
+    # T->start( 'connection' );
     DEBUG and $self->D( "accept" );
     $self->state( 'accept' );
 
@@ -820,6 +822,7 @@ sub close_connection
     $C->{aborted} = 1;
     my $W = delete $self->{wheel};
     $W->DESTROY if $W;
+    # T->end( 'connection' );
     return;
 }
 
@@ -835,6 +838,7 @@ sub drop
 sub input
 {
     my( $self, $req ) = @_;
+    # T->start( 'REQ' );
     DEBUG and $self->D( "input" );
 
     $self->state( 'handling' );
@@ -897,6 +901,7 @@ sub output
     my( $self, $something ) = @_;
 
     $self->{flushing} = 1;
+    # T->point( REQ => 'output' );
     $self->{wheel}->put( $something );
 }
 
@@ -946,6 +951,7 @@ sub finish_request
     $self->close if $self->{will_close};
     $self->drop;
     $self->pending_next;
+    # T->end( 'REQ' );
 }
 
 
@@ -961,6 +967,7 @@ sub dispatch
 
     my( $re, $handler ) = $self->find_handler( $path );
     if( $handler ) {
+        # T->point( REQ => "handler $re" );
         $self->invoke( $re, $handler, $self->{req}, $self->{resp} );
     }
     else {
