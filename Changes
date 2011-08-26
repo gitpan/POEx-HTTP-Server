@@ -1,5 +1,10 @@
 Revision history for Perl extension POEx::HTTP::Server.
 
+0.0802 Aug 26, 2011
+    - Added do_retry to methods for server.  Now retry should work
+        Thank you Kevin Smith
+
+
 0.0801 Aug 26, 2011
     - Use SIGUSR1, not 11
 

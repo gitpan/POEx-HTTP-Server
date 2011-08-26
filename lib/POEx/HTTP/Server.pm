@@ -15,7 +15,7 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0801';
+our $VERSION = '0.0802';
 
 sub DEBUG () { 0 }
 
@@ -285,7 +285,7 @@ sub build_session
                                       error shutdown ) ],
                             $package => [ 
                                 qw( _start build_server
-                                    accept retry close
+                                    accept retry do_retry close
                                     handlers_get handlers_add handlers_remove
                                     prefork_child prefork_accept 
                                     prefork_parent prefork_shutdown
