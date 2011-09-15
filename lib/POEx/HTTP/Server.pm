@@ -15,7 +15,7 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0802';
+our $VERSION = '0.0803';
 
 sub DEBUG () { 0 }
 
@@ -758,6 +758,7 @@ sub build_response
 {
     my( $self ) = @_;
     my $resp = POEx::HTTP::Server::Response->new(RC_OK);
+    $resp->header( 'X-PID' => $$ );
     $resp->request( $self->{req} ) if $self->{req};
     $resp->{__respond} = rsvp"respond";
     $resp->{__send} = rsvp"send";
@@ -1207,7 +1208,9 @@ sub done
     my( $self ) = @_;
     $self->state( 'done' );
     DEBUG and $self->D( "Done" );
-    unless( $self->{flushing} ) {
+    # If we don't have a {req}, then the request has already finished
+    # But wait until request is flushed to finish it.
+    if( not $self->{flushing} and $self->{req} ) {
         $self->finish_request;
     }
 }

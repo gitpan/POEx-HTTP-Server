@@ -4,7 +4,8 @@ use ExtUtils::MakeMaker;
 # the contents of the Makefile that is written.
 WriteMakefile(
     NAME              => 'POEx::HTTP::Server',
-    VERSION_FROM      => 'lib/POEx/HTTP/Server.pm', # finds $VERSION
+    VERSION_FROM      => 'lib/POEx/HTTP/Server.pm',
+    ABSTRACT_FROM     => 'lib/POEx/HTTP/Server.pm', 
     PREREQ_PM         => {
             'POE'           => 1,
             'POEx::URI'     => 0.0301,
@@ -18,8 +19,7 @@ WriteMakefile(
             'HTTP::Response' => 1,
             'HTTP::Date' => 1
 		},
-    ($] >= 5.005 ?     ## Add these new keywords supported since 5.005
-      (ABSTRACT_FROM  => 'lib/POEx/HTTP/Server.pm', # retrieve abstract from module
-       AUTHOR         => 'Philip Gwyn <fil@localdomain>') : ()),
-    dist=>{COMPRESS=>'gzip -9f', EXT=>'gz'},
+    AUTHOR            => 'Philip Gwyn <fil -at- cpan.org>',
+    LICENSE           => 'perl',
+    dist              => { COMPRESS=>'gzip -9f', EXT=>'gz'},
 );
