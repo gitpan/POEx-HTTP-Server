@@ -15,7 +15,7 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0803';
+our $VERSION = '0.0804';
 
 sub DEBUG () { 0 }
 
@@ -406,6 +406,9 @@ sub accept
     my $obj = $self->build_client( $self->{N}++, $socket );
     poe->session->object( $obj->name, $obj );
     $obj->build_wheel( $socket );
+    # Starting a keepalive here prevents the client from keeping a connection
+    # open by never sending a request
+    $obj->keepalive_start;
 
     $self->concurrency_up;
     $self->{clients}{$obj->name} = 1;
@@ -730,7 +733,7 @@ sub build_wheel
     $self->{wheel} = POE::Wheel::ReadWrite->new( 
                         Handle => $socket,
                         InputEvent => evo( $self->{name}, 'input' ),
-                        ErrorEvent => evo( $self->{name}, 'client_error' ),
+                        ErrorEvent => evo( $self->{name}, 'error' ),
                         FlushedEvent => evo( $self->{name}, 'flushed' ),
                         Filter     => $filter
                     );
@@ -1500,14 +1503,16 @@ per connection.
 
 If C<$N> isn't a number, or is simply C<1>, then the default 100.
 
-B<Note> that HTTP/1.0 Keep-Alive extension is not currently not supported
+B<Note> that HTTP/1.0 Keep-Alive extension is currently not supported.
 
 =head3 keepalivetimeout
 
     POEx::HTTP::Server->spawn( keepalivetimeout => $TIME );
 
-Sets the number of seconds to wait for a subsequent request before closing a
-connection.
+Sets the number of seconds to wait for a request before closing a
+connection.  The applies to the time between opening a connection and the
+first request.  It also aplies to the time between completing a request and
+receiving a new one.
 
 Defaults to 5 seconds.
 

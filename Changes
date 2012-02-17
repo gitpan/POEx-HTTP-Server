@@ -1,5 +1,10 @@
 Revision history for Perl extension POEx::HTTP::Server.
 
+0.0804 Feb 15, 2012
+    - It's 'error', not 'client_error'.  This fixes intermittent 
+        halting problems.
+    - Start a keepalive timer before we even get a request, to prevent DoS.
+
 0.0803 Sep 16, 2011
     - Changed AUTHOR and added LICENSE
 
@@ -56,3 +61,8 @@ Revision history for Perl extension POEx::HTTP::Server.
 0.01  Mon Dec 13, 2010
     - Initial release
 
+------------------------------------------------------------------------
+r875 | fil | 2012-02-16 18:19:01 -0500 (Thu, 16 Feb 2012) | 3 lines
+
+
+------------------------------------------------------------------------
