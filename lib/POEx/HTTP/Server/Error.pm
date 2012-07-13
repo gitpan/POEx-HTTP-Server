@@ -60,9 +60,9 @@ Network errors are those reported by L<POE::Wheel::SocketFactory>,
 L<POE::Wheel::ReadWrite> and L<Sys::Sendfile/sendfile> if that is used.
 
 HTTP errors are those reported by L<POE::Filter::HTTPD> when it detects a
-mal-formed header or errors internal to L<POEx::HTTP::Server>.  However
+mal-formed header or errors internal to L<POEx::HTTP::Server>.  However,
 errors reported with L<POEx::HTTP::Server::Response/error> do not invoke
-C<on_error> and so are not HTTP errors.
+C<on_error>.
 
 HTTP errors are nearly always sent to the browser.  You may modify the
 L<HTTP::Response/content> or prevent them being sent by setting
@@ -72,7 +72,7 @@ HTTP errors will always close the connection, even if keep-alive is set.
 
 =head1 METHODS
 
-As this is a sub-class of L<POEx::HTTP::Server::Response>, it all that class's
+As this is a sub-class of L<POEx::HTTP::Server::Response>, all that class's
 methods are available.  Note, however, that
 L<POEx::HTTP::Server::Response/request> might be C<undef>.
 

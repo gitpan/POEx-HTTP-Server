@@ -1,4 +1,4 @@
-# $Id: Response.pm 745 2011-02-18 02:35:18Z fil $
+# $Id: Response.pm 890 2012-06-19 18:51:39Z fil $
 # Copyright 2010 Philip Gwyn
 
 package POEx::HTTP::Server::Response;
@@ -8,11 +8,10 @@ use warnings;
 
 use Carp;
 use POE;
+use File::Basename;
 use HTTP::Date;
 use HTTP::Status qw( RC_NOT_FOUND RC_FORBIDDEN 
                      RC_NOT_MODIFIED RC_INTERNAL_SERVER_ERROR );
-
-use File::Basename;
 
 use base qw( HTTP::Response );
 
@@ -216,7 +215,7 @@ It is a sub-class of L<HTTP::Response> with the following additions:
 
     $req->done;
 
-Finishes the request.  If keep-alive isn't active, this will close the
+Finishes the request.  If keepalive isn't active, this will close the
 connection.  Must be called after C<respond> or C<send>.  Having a seperate
 L<done> and <respond> means that you can do some post processing after the
 response was sent.
@@ -241,7 +240,7 @@ When L</error> is called, the response is sent to the browser
 
 =head2 finished
 
-Flase; will be set to true if when L</done> is called.
+False; will be set to true when L</done> is called.
 
 =head2 respond
 
@@ -256,7 +255,7 @@ L</done> must still be called to finish the request.
     $resp->send( [$CONTENT] );
 
 Sends the response header (if not already sent) and C<$CONTENT> to the
-browser (if defiened). The request is kept open and furthur calls to C<send>
+browser (if defined). The request is kept open and furthur calls to C<send>
 are allowed to send more content to the browser.
 
 =head3 sendfile

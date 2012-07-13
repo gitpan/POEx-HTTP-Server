@@ -58,6 +58,7 @@ Returns an L<POEx::HTTP::Server::Connection> object.
 
 =head1 SEE ALSO
 
+L<HTTP::Request>,
 L<POEx::HTTP::Server>, 
 L<POEx::HTTP::Server::Response>, 
 L<POEx::HTTP::Server::Connection>.

@@ -15,9 +15,9 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0804';
+our $VERSION = '0.0900';
 
-sub DEBUG () { 0 }
+sub DEBUG () { 1 and not $INC{'Test/More.pm'} }
 
 
 ##############################################################################
@@ -62,13 +62,26 @@ sub state
 sub D
 {
     my $self = shift;
+    $self->_D( 1, @_ );
+}
+
+sub D1
+{
+    my $self = shift;
+    $self->_D(2,@_);
+}
+
+sub _D
+{
+    my $self = shift;
+    my $level = shift;
     my $prefix = "$$:$self->{name}:";
     $prefix .= "$self->{state}:" if $self->{state};
     my $msg = join '', @_;
     $msg =~ s/^/$prefix /m;
     $DB::single = 1;
     unless( $msg =~ /\n$/ ) {
-        my %i = Carp::caller_info(0);
+        my %i = Carp::caller_info($level);
         $msg .= " at $i{file} line $i{line}\n";
     }
     print STDERR $msg;
@@ -89,8 +102,8 @@ sub special_dispatch
 # Invoke an HTTP or special handler
 sub invoke
 {
-    my( $self, $re, $handler, @args ) = @_;
-    DEBUG and $self->D( "Invoke handler for '$re' ($handler)" );
+    my( $self, $why, $handler, @args ) = @_;
+    DEBUG and $self->D( "Invoke handler for '$why' ($handler)" );
     eval { $poe_kernel->call( @$handler, @args ) };
     if( $@ ) {
         warn $@;
@@ -207,6 +220,14 @@ sub __init
     $self->{keepalive} ||= 0;
     # warn "keepalive=$self->{keepalive}";
 
+    $self->{timeout} = delete $opt->{timeout};
+    if( not defined $self->{timeout} ) {
+        # Apache 1 default
+        #$self->{timeout} = 1200;
+        # Apache 2 default
+        $self->{timeout} = 300;
+    }
+
     $self->{keepalivetimeout} = delete $opt->{keepalivetimeout};
     if( not defined $self->{keepalivetimeout} and $self->{keepalive} ) {
         # Apache 1 default
@@ -287,14 +308,14 @@ sub build_session
                                 qw( _start build_server
                                     accept retry do_retry close
                                     handlers_get handlers_add handlers_remove
-                                    prefork_child prefork_accept 
+                                    prefork_child prefork_accept error
                                     prefork_parent prefork_shutdown
                                 ) ],
                             'POEx::HTTP::Server::Client' => [ 
                                 qw( input timeout 
                                     respond send 
                                     sendfile_start
-                                    flushed done
+                                    flushed done error
                             ) ]
                       ],
                       args => [ $self ],
@@ -406,14 +427,15 @@ sub accept
     my $obj = $self->build_client( $self->{N}++, $socket );
     poe->session->object( $obj->name, $obj );
     $obj->build_wheel( $socket );
-    # Starting a keepalive here prevents the client from keeping a connection
+    # Starting the timeout here prevents the client from keeping a connection
     # open by never sending a request
-    $obj->keepalive_start;
+    $obj->timeout_start;
 
     $self->concurrency_up;
     $self->{clients}{$obj->name} = 1;
     DEBUG and $self->D( "accept ".$obj->name );
     $self->prefork_accepted;
+
     $self->state( 'listen' );
 }
 
@@ -442,7 +464,8 @@ sub concurrency_up
     $self->{C}++;
     return unless $self->{concurrency} > 0;
     if( $self->{C} >= $self->{concurrency} ) {
-        DEBUG and $self->D( "pause_accept C=$self->{C}" );
+        DEBUG and 
+            $self->D( "pause_accept C=$self->{C}" );
         $self->{server}->pause_accept;
         $self->{paused} = 1;
     }
@@ -455,7 +478,8 @@ sub concurrency_down
     return unless $self->{concurrency} > 0;
     unless( $self->{C} >= $self->{concurrency} and $self->{paused} ) {
         if( $self->{server} ) {
-            DEBUG and $self->D( "resume_accept C=$self->{C}" );
+            DEBUG and 
+                $self->D( "resume_accept C=$self->{C}" );
             $self->{server}->resume_accept;
         }
         $self->{paused} = 0;
@@ -597,7 +621,8 @@ sub prefork
 sub prefork_child
 {
     my( $self ) = @_;
-    DEBUG and $self->D( "prefork_child" );
+    DEBUG and 
+        $self->D( "prefork_child" );
     delete $self->{parent};
     $self->prefork( 'wait' );
 }
@@ -608,8 +633,14 @@ sub prefork_accept
 {
     my( $self ) = @_;
     DEBUG and 
-        $self->D( "prefork_accept" );
-    $self->{server}->resume_accept unless $self->{resume_once}++;
+        $self->D( "prefork_accept resume_once=".($self->{resume_once}||'') );
+    if( $self->{resume_once} ) {
+        # Daemon->peek( 1 );
+    }
+    else {
+        $self->{resume_once} = 1;
+        $self->{server}->resume_accept;
+    }
 }
 
 #######################################
@@ -620,7 +651,8 @@ sub prefork_accepted
     DEBUG and $self->D( "prefork_accepted" );
     return unless $self->{prefork};
     $self->prefork( 'req' );
-    # $self->{server}->pause_accept unless $self->{concurrency} > 1;
+    # 2012/07 - server handles the pause_accept() etc in concurrency_down
+    #$self->{server}->pause_accept unless $self->{concurrency} > 1;
 }
 
 #######################################
@@ -639,7 +671,8 @@ sub prefork_close
 sub prefork_parent 
 {
     my( $self ) = @_;
-    DEBUG and $self->D( "prefork_parent" );
+    DEBUG and 
+        $self->D( "prefork_parent" );
     $self->{parent} = $$;
 }
 
@@ -668,6 +701,7 @@ sub build_client
                     headers => $self->{headers},
                     error   => $self->{error},
                     blocksize => $self->{blocksize},
+                    timeout   => $self->{timeout},
                     keepalive => $self->{keepalive},
                     keepalivetimeout => $self->{keepalivetimeout},
                 );
@@ -810,12 +844,16 @@ sub close
 {
     my( $self ) = @_;
     $self->state( 'closing' );
-    DEBUG and $self->D( "Close" );
+    DEBUG and 
+        $self->D( "Close" );
     $poe_kernel->yield( $self->{__close}, $self->name );
     poe->session->object_unregister( $self->{name} );
     $self->on_disconnect;
     $self->close_connection;
     $self->keepalive_stop;
+    $self->timeout_stop;
+    # use POE::Component::Daemon;
+    # Daemon->peek( 1 );
 }
 
 sub close_connection
@@ -847,6 +885,9 @@ sub input
 
     $self->state( 'handling' );
 
+    # stop the timer that was started on accept
+    $self->timeout_stop;
+    # stop any keepalive timer we might have
     $self->keepalive_stop;
 
     if( $self->{req} ) {
@@ -947,7 +988,13 @@ sub finish_request
     my( $self ) = @_;
     $self->state( 'done' );
     DEBUG and $self->D( 'finish_request' );
-    $self->keepalive_start;
+
+    if( $self->keepalive_start ) {
+        # if we have keepalive set, then we don't need the TCP timeout
+        $self->timeout_stop;
+    }
+    # If we don't have a keepalive, {will_close} will be true and that will
+    # force a socket close
 
     # next 3 MUST be in this order if we want post_request to always come 
     # before on_disconnect (which is posted from ->close()) 
@@ -969,10 +1016,10 @@ sub dispatch
     my $path = $self->{req} && $self->{req}->uri ?
                                $self->{req}->uri->path : '/';
 
-    my( $re, $handler ) = $self->find_handler( $path );
+    my( $why, $handler ) = $self->find_handler( $path );
     if( $handler ) {
         # T->point( REQ => "handler $re" );
-        $self->invoke( $re, $handler, $self->{req}, $self->{resp} );
+        $self->invoke( $why, $handler, $self->{req}, $self->{resp} );
     }
     else {
         $self->{resp}->error( RC_NOT_FOUND, "No handler for path $path.\n" );
@@ -1006,6 +1053,7 @@ sub respond
     }
 
     $self->{resp}->content( undef() );
+    $self->timeout_start();
     return;
 }
 
@@ -1097,6 +1145,7 @@ sub send
     if( $self->{resp}->streaming and $self->{wheel} ) {
         $self->{wheel}->flush;            
     }
+    $self->timeout_start();
     return;
 }
 
@@ -1104,6 +1153,7 @@ sub send
 sub send_more
 {
     my( $self ) = @_;
+    $self->timeout_stop();
     $self->special_dispatch( 'stream_request', $self->{req}, $self->{resp} );
 }
 
@@ -1165,6 +1215,7 @@ sub sendfile_start
                           path=>$path, bs=>$self->{blocksize} };
     $self->send;
     # we wait for the 'flush' event to invoke sendfile.
+    $self->timeout_start();
 }
 
 sub sendfile_next
@@ -1201,6 +1252,7 @@ sub sendfile_next
         $self->done;
         delete $self->{sendfile};
     }
+    $self->timeout_start();
     return $len;
 }
 
@@ -1229,17 +1281,20 @@ sub keepalive_start
     DEBUG and 
             $self->D( "keep-alive=$self->{keepalive}" );
     DEBUG and $self->D( "keep-alive timeout=$self->{keepalivetimeout}" );
-    $self->{TID} = $poe_kernel->delay_set( ev"timeout", 
+    $self->{KAID} = $poe_kernel->delay_set( ev"timeout", 
                                                $self->{keepalivetimeout} 
                                              );
-    DEBUG and $self->D( "keep-alive start tid=$self->{TID}" );
+    DEBUG and $self->D1( "keep-alive start tid=$self->{KAID}" );
     $self->state( 'waiting' );
+    return 1;
 }
 
+#######################################
 sub timeout
 {
     my( $self ) = @_;
     $self->keepalive_stop;
+    $self->timeout_stop;
     $self->close;
 }
 
@@ -1247,10 +1302,44 @@ sub timeout
 sub keepalive_stop
 {
     my( $self ) = @_;
+    return unless $self->{KAID};
+    DEBUG and $self->D1( "keep-alive stop tid=$self->{KAID}" );
+    $poe_kernel->alarm_remove( delete $self->{KAID} );
+}
+
+
+
+#######################################
+sub timeout_start
+{
+    my( $self ) = @_;
+    return unless $self->{timeout} and $self->{connection};
+    if( $self->{TID} ) {
+        DEBUG and 
+            $self->D1( "timeout restart tid=$self->{TID}" );
+        $poe_kernel->delay_adjust( $self->{TID}, $self->{timeout} );
+    }
+    else {
+        DEBUG and $self->D( "timeout timeout=$self->{timeout}" );
+        $self->{TID} = $poe_kernel->delay_set( evo( $self->name, "timeout" ), 
+                                               $self->{timeout} 
+                                             );
+        DEBUG and 
+            $self->D1( "timeout start tid=$self->{TID}" );
+    }
+}
+
+
+#######################################
+sub timeout_stop
+{
+    my( $self ) = @_;
     return unless $self->{TID};
-    DEBUG and $self->D( "keep-alive stop tid=$self->{TID}" );
+    DEBUG and 
+            $self->D1( "timeout stop tid=$self->{TID}" );
     $poe_kernel->alarm_remove( delete $self->{TID} );
 }
+
 
 #######################################
 sub shutdown
@@ -1347,9 +1436,7 @@ POEx::HTTP::Server - POE HTTP server
     sub root {
         my( $heap, $req, $resp ) = @_[HEAP,ARG0,ARG1];
         $resp->content_type( 'text/html' );
-        $resp->content( << HTML );
-<html>...</html>
-HTML
+        $resp->content( generate_html() );
         $resp->done;
     }
 
@@ -1369,11 +1456,11 @@ HTML
 
 POEx::HTTP::Server is a clean POE implementation of an HTTP server.  It uses
 L<POEx::URI> to simplify event specification.  It allows limiting connection
-concurrency and implements HTTP 1.1 keep-alive.  It has built in
-compatibility with L<POE::Component::Daemon>'s L</prefork> server support.
+concurrency and implements HTTP 1.1 keep-alive.  It has built-in
+compatibility with L<POE::Component::Daemon> L</prefork> servers.
 
 POEx::HTTP::Server also includes a method for easily sending a static file
-to the browser, with HEAD and If-Modified-Since support.
+to the browser, with automatic support for C<HEAD> and C<If-Modified-Since>.
 
 POEx::HTTP::Server enforces some of the HTTP 1.1 requirements, such as
 the C<Content-Length> and C<Date> headers.
@@ -1388,7 +1475,7 @@ using Moose and not using the YELLING-STYLE of parameter passing.
 
 =head1 METHODS
 
-POEx::HTTP::Server has one public package method.
+POEx::HTTP::Server has one public class method.
 
 =head2 spawn
 
@@ -1419,7 +1506,7 @@ Defaults to:
     POEx::HTTP::Server->spawn( handlers => $ARRAYREF );
 
 Set the events that handle a request.  Keys to C<$HASHREF> are regexes which 
-match on all or part of the request path.  Values are L<url|POEx::URI> to
+match on all or part of the request path.  Values are L<poe: urls|POEx::URI> to
 the events that will handle the request.
 
 The regexes are not anchored.  This means that C</foo> will match the path 
@@ -1487,21 +1574,23 @@ Defaults to (-1), unlimited concurrency.
 All the key/value pairs in C<$HASHREF> will be set as HTTP headers on
 all responses.
 
-By default, the C<Server> header is set.
+By default, the C<Server> header is set to C<$PACKAGE/$VERSION> where
+C<$PACKAGE> is C<POEx::HTTP::Server> or any sub-class you might have crated
+and C<$VERSION> is the current version of C<POEx::HTTP::Server>.
 
 =head3 keepalive
 
     POEx::HTTP::Server->spawn( keepalive => $N );
 
-Activates the HTTP/1.0 Keep-Alive extension and HTTP/1.1 persistent
-connection feature if true.  Deactivates keep-alive if false.
+Activates the HTTP/1.1 persistent connection feature if true.  Deactivates
+keep-alive if false.
 
 Default is 0 (off).
 
 If C<$N> is a number, then it is used as the maximum number of requests
 per connection.
 
-If C<$N> isn't a number, or is simply C<1>, then the default 100.
+If C<$N> isn't a number, or is simply C<1>, then the default is 100.
 
 B<Note> that HTTP/1.0 Keep-Alive extension is currently not supported.
 
@@ -1510,8 +1599,7 @@ B<Note> that HTTP/1.0 Keep-Alive extension is currently not supported.
     POEx::HTTP::Server->spawn( keepalivetimeout => $TIME );
 
 Sets the number of seconds to wait for a request before closing a
-connection.  The applies to the time between opening a connection and the
-first request.  It also aplies to the time between completing a request and
+connection.  This aplies to the time between completing a request and
 receiving a new one.
 
 Defaults to 5 seconds.
@@ -1526,12 +1614,12 @@ Options passed L<POE::Session>->create.
 
     POEx::HTTP::Server->spawn( prefork => 1 );
 
-Turns on the L<POE::Component::Daemon> pre-fork server support.  You must
+Turns on L<POE::Component::Daemon> prefork server support.  You must
 spawn and configure the POE::Component::Daemon yourself.  
 
 Defaults to 0, no preforking support.
 
-In a normal pre-forking server, only one request may be handled by a child
+In a normal preforking server, only one request will be handled by a child
 process at the same time.  This is equivalent to L</concurrency> = 1. 
 However, you may set concurrecy to another value, so that each child process
 may handle several request at the same time.  This has not been tested.
@@ -1545,12 +1633,52 @@ operation.
 
 Defaults to 60.  Use 0 to turn retry off.
 
+=head3 timeout
+
+    POEx::HTTP::Server->spawn( timeout => $SECONDS );
+
+Set the number of seconds to wait for the next TCP event.  This timeout is
+used in the following circumstances :
+
+=over 4
+
+=item *
+
+between accepting a connection and receiving the full request;
+
+=item *
+
+between sending a response and flushing the output buffer; 
+
+=item *
+
+while waiting for a streamed response chunk to flush.
+
+=back
+
+Defaults to 300 seconds.  Setting this timeout to 0 will allow the client to
+hold a connection open indefinately.
+
+
+
+
 =head1 HANDLERS
 
-A handler is a POE event that will handle a given HTTP request.  C<ARG0> is
-a L<POEx::HTTP::Server::Request> object.  C<ARG1> is a
-L<POEx::HTTP::Server::Response> object.  The handler should query the
-request object for details or parameters of the request.  
+A handler is a POE event that processes a given HTTP request and generates
+the response.  It is invoked with:
+
+=over 4
+
+=item C<ARG0> 
+: a L<POEx::HTTP::Server::Request> object.  
+
+=item C<ARG1>
+: a L<POEx::HTTP::Server::Response> object.
+
+=back
+
+The handler should query the request object for details or parameters of the
+request.
 
     my $req = $_[ARG0];
     my $file = File::Spec->catfile( $doc_root, $req->uri->path );
@@ -1567,7 +1695,7 @@ the response code approriately.  A default HTTP status of RC_OK (200) is used.
 The response is sent to the browser with either
 C<L<POEx::HTTP::Server::Response/respond>> or
 C<L<POEx::HTTP::Server::Response/send>>.  When the handler is finished, it
-calls C<L<POEx::HTTP::Server::Response/done>> on the response object.
+must call C<L<POEx::HTTP::Server::Response/done>> on the response object.
 
     # Generated content
     my $resp = $_[ARG1];
@@ -1598,7 +1726,7 @@ The last example is silly.  It would be better to use L</sendfile> like so:
     # Don't call ->done after sendfile
 
 Handlers may chain to other event handlers, using normal POE events.  You must
-keep track of at least the request handler so that you may call C<done> when
+keep track of at least the response handler so that you may call C<done> when
 the request is finished.
 
 Here is an example of an unrolled loop:
@@ -1621,7 +1749,7 @@ Here is an example of an unrolled loop:
             # Send the content returned by event handlers in another session
             my $chunk = $poe_kernel->call( $heap->{session}, $h, $req )
             $resp->send( $chunk );
-            $poe_kernel->yeild( next_handler => $resp );
+            $poe_kernel->yield( next_handler => $resp );
         }
         else {
             $poe_kernel->yield( 'last_handler', $resp );
@@ -1695,9 +1823,6 @@ objects that use this connection.
         # ...
     }
 
-If you use L</keepalive>, L</pre_request> will be invoked more often then
-C<on_connect>.
-
 =head3 on_disconnect
 
 Invoked when a connection is closed. C<ARG0> is the same
@@ -1716,6 +1841,9 @@ C<ARG0> is a L<POEx::HTTP::Server::Request> object.  There is no C<ARG1>.
         my $connection = $request->connection;
         # ...
     }
+
+If you use L</keepalive>, L</pre_request> will be invoked more often then
+C<on_connect>.
 
 =head3 post_request
 
@@ -1741,7 +1869,8 @@ L<POEx::HTTP::Server::Response/streaming>.
 
 Please remember that while a chunk might be flushed, the OS's network layer
 might still decide to combine several chunks into a single packet.  And this
-even though we set TCP_NODELAY to 1 and SO_SNDBUF to 576.
+even though we setup a I<hot> socket with C<TCP_NODELAY> set to 1 and
+C<SO_SNDBUF> to 576.
 
 =head3 on_error
 
@@ -1782,10 +1911,9 @@ The following POE events may be used to control POEx::HTTP::Server.
     $poe_kernel->signal( $poe_kernel => 'shutdown' );
     $poe_kernel->post( HTTPd => 'shutdown' );
 
-Initiate server shutdown.  Any pending requests will stay active, however. 
-The session will exit when the last of the requests has finished.
-No further requests will be accepted on the conntection, even if keepalive
-is used.
+Initiate server shutdown.  Any pending requests will stay active, however.
+The session will exit when the last of the requests has finished. No further
+requests will be accepted, even if keepalive is in use.
 
 =head2 handlers_get
 
