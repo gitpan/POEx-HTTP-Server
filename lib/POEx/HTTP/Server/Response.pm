@@ -1,4 +1,4 @@
-# $Id: Response.pm 890 2012-06-19 18:51:39Z fil $
+# $Id: Response.pm 909 2012-07-13 15:38:39Z fil $
 # Copyright 2010 Philip Gwyn
 
 package POEx::HTTP::Server::Response;

@@ -15,9 +15,9 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0900';
+our $VERSION = '0.0901';
 
-sub DEBUG () { 1 and not $INC{'Test/More.pm'} }
+sub DEBUG () { 0 and not $INC{'Test/More.pm'} }
 
 
 ##############################################################################

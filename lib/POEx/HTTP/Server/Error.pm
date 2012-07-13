@@ -1,4 +1,4 @@
-# $Id: Error.pm 702 2010-12-15 20:06:31Z fil $
+# $Id: Error.pm 909 2012-07-13 15:38:39Z fil $
 # Copyright 2010 Philip Gwyn
 
 package POEx::HTTP::Server::Error;
