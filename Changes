@@ -1,5 +1,20 @@
 Revision history for Perl extension POEx::HTTP::Server.
 
+0.0902 May 2, 2013
+    - Correct to HTTP::Status::RC_INTERNAL_SERVER_ERROR 
+            Thank you Olivier Duclos
+    - Explicitly call ->close() as an attempt to avoid TIME_WAIT on Windows
+    - yield to 'close', so the above doesn't explode
+    - Don't use open "-|", use pipe_from_fork() instead
+            Thank you Alexandr Ciornii
+    - Fixed handling of input errors.  Previously it would crash if a
+        malformed request was sent as a second or subsequent request on a
+        keep-alive connection.
+            Thank you Dzs Bsd    
+
+0.0901 Jul 13, 2012
+    - Turn off DEBUG
+
 0.0900 Jul 13, 2012
     - Added 'timeout' param
     - Tweak the documentation

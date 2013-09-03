@@ -10,9 +10,11 @@ use Test::More;
 use Data::Dump qw( pp );
 use IO::Socket::INET;
 use POEx::HTTP::Server;
+use Symbol;
 use URI;
 
 use t::Server;
+use t::ForkPipe; 
 
 
 eval "use LWP::UserAgent";
@@ -39,7 +41,8 @@ DEBUG and
 undef( $sock );
 
 ###############################################3
-my $pid = open( CHILD, "-|" );
+my $child = gensym;
+my $pid = pipe_from_fork( $child );
 defined($pid) or die "Unable to fork: $!";
 unless( $pid ) {
     $poe_kernel->has_forked;
@@ -89,7 +92,7 @@ my $second = $1;
 isnt( $second, $first, "Different PIDs" );
 
 kill 10, $pid if $pid;
-while( <CHILD> ) { diag( $_ ); }
+while( <$child> ) { diag( $_ ); }
 
 
 #####

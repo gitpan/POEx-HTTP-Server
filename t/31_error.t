@@ -11,7 +11,9 @@ use Data::Dump qw( pp );
 use IO::Socket::INET;
 use POE;
 use POEx::HTTP::Server;
+use Symbol;
 use URI;
+use t::ForkPipe; 
 
 eval "use LWP::UserAgent";
 if( $@ ) {
@@ -31,7 +33,8 @@ undef( $sock );
 
 ###############################################
 # $DB::fork_TTY='/dev/pts/4';
-my $pid = open( CHILD, "-|" );
+my $child = gensym;
+my $pid = pipe_from_fork( $child );
 defined($pid) or die "Unable to fork: $!";
 unless( $pid ) {    # child
     $poe_kernel->has_forked;
@@ -110,7 +113,7 @@ POEx::HTTP::Server->spawn(
 $poe_kernel->run;
 pass( "Exited" );
 
-while(<CHILD>) {
+while(<$child>) {
     DEBUG and warn $_;
 }
     

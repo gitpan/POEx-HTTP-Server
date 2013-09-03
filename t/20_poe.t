@@ -5,12 +5,15 @@ use warnings;
 
 sub DEBUG () { 0 }
 
+use Symbol;
 use Test::More;
+use t::ForkPipe;
 
 use Data::Dump qw( pp );
 use IO::Socket::INET;
 BEGIN { $POEx::HTTP::Server::Client::HAVE_SENDFILE = 0; }
 use POEx::HTTP::Server;
+use Symbol;
 use URI;
 
 
@@ -42,8 +45,9 @@ undef( $sock );
 
 # $DB::fork_TTY = '/dev/pts/4';
 
-###############################################3
-my $pid = open( CHILD, "-|" );
+###############################################
+my $child = gensym;
+my $pid = pipe_from_fork( $child );
 defined($pid) or die "Unable to fork: $!";
 unless( $pid ) {
     $poe_kernel->has_forked;
@@ -148,7 +152,7 @@ $req = HTTP::Request->new( GET => $uri );
 $resp = $UA->request( $req );
 ok( $resp->is_success, "GET $uri" ) or die "Failed: ", pp $resp;
 
-while( <CHILD> ) {
+while( <$child> ) {
     diag( $_ );
 }
 

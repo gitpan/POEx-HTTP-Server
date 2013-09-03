@@ -15,9 +15,9 @@ use Data::Dump qw( pp );
 use Scalar::Util qw( blessed );
 use Storable qw( dclone );
 
-our $VERSION = '0.0901';
+our $VERSION = '0.0902';
 
-sub DEBUG () { 0 and not $INC{'Test/More.pm'} }
+sub DEBUG () { 0 and  not $INC{'Test/More.pm'} }
 
 
 ##############################################################################
@@ -335,7 +335,7 @@ sub build_error
 {
     my( $package, $uri ) = @_;
     $uri ||= '/';
-    return POEx::HTTP::Server::Error->new( HTTP::Status::RC_INTERNAL_ERROR() );
+    return POEx::HTTP::Server::Error->new( HTTP::Status::RC_INTERNAL_SERVER_ERROR() );
 }
 
 #######################################
@@ -433,7 +433,7 @@ sub accept
 
     $self->concurrency_up;
     $self->{clients}{$obj->name} = 1;
-    DEBUG and $self->D( "accept ".$obj->name );
+    DEBUG and $self->D( "accept ".$obj->name." socket=".$socket );
     $self->prefork_accepted;
 
     $self->state( 'listen' );
@@ -723,7 +723,7 @@ use POEx::HTTP::Server::Response;
 use POEx::HTTP::Server::Connection;
 use POEx::HTTP::Server::Error;
 use POE::Session::PlainCall;
-use POE::Session::Multiplex;
+use POE::Session::Multiplex qw( ev evo rsvp );
 use POE::Filter::Stream;
 
 use base qw( POEx::HTTP::Server::Base );
@@ -731,6 +731,7 @@ use base qw( POEx::HTTP::Server::Base );
 use Data::Dump qw( pp );
 
 BEGIN { *DEBUG = \&POEx::HTTP::Server::DEBUG }
+# sub DEBUG () { 1 }
 
 our $HAVE_SENDFILE;
 BEGIN {
@@ -831,12 +832,17 @@ sub error
 
     if( $op eq 'read' and $errnum == 0 ) {  
         # this is a normal error
-        DEBUG and $self->D( "$op error ($errnum) $errstr" );
+        DEBUG and 
+            $self->D( "$op error ($errnum) $errstr" );
     }
     else {
         $self->net_error( $op, $errnum, $errstr );
     }
-    $self->close;
+
+    # 2013-04 - We use ->yield and not ->close so that POE can empty the
+    # queue of all events provoked by the last select().  This way the
+    # explicit socket->close will not cause problems.
+    $poe_kernel->yield( ev "close" );
 }
 
 #######################################
@@ -863,7 +869,16 @@ sub close_connection
     my $C = delete $self->{connection};
     $C->{aborted} = 1;
     my $W = delete $self->{wheel};
-    $W->DESTROY if $W;
+    if( $W ) {
+        my $socket = $W->get_input_handle;
+        $W->DESTROY;
+        if( $socket ) {
+            DEBUG and $self->D( "Shutdown socket=$socket" );
+            # Do an explicit shutdown, for Windows problems
+            shutdown( $socket, 2 );
+            $socket->close;
+        }
+    }
     # T->end( 'connection' );
     return;
 }
@@ -910,7 +925,6 @@ sub input
 
     # Build response
     $self->{resp} = $self->build_response;
-
     $self->reset_req;
 
     $self->dispatch;
@@ -922,8 +936,13 @@ sub input_error
     DEBUG and $self->D( "ERROR ", $resp->status_line );
     bless $resp, 'POEx::HTTP::Server::Error';
     $self->special_dispatch( on_error => $resp );
+    $self->{req} = POEx::HTTP::Server::Request->new( ERROR => '/' );
+    $self->{req}->connection( $self->{connection} );
+    $self->{req}->protocol( "HTTP/1.1" );
     $self->{resp} = $resp;
+    $self->reset_req;
     $self->{shutdown} = 1;
+
     $self->respond;
 }
 
@@ -1371,7 +1390,7 @@ sub pending_next
     return unless $self->{pending} and @{ $self->{pending} };
     if( $self->{S}{shutdown} or $self->{S}{closing} ) {
         $self->D( "We are closing down with pending requests" );
-        $self->pending_reply;
+        $self->pending_no_reply;
         return;
     }
     my $next = shift @{ $self->{pending} };
@@ -1381,7 +1400,7 @@ sub pending_next
 }
 
 #######################################
-sub pending_reply
+sub pending_no_reply
 {
     my( $self ) = @_;
     return unless $self->{wheel};

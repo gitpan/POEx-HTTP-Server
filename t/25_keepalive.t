@@ -11,9 +11,11 @@ use Data::Dump qw( pp );
 use IO::Socket::INET;
 use POEx::HTTP::Server;
 use POSIX qw( SIGUSR1 );
+use Symbol;
 use URI;
 
 use t::Server;
+use t::ForkPipe; 
 
 
 
@@ -41,7 +43,8 @@ DEBUG and
 
 undef( $sock );
 
-my $pid = open( CHILD, "-|" );
+my $child = gensym;
+my $pid = pipe_from_fork( $child );
 defined($pid) or die "Unable to fork: $!";
 unless( $pid ) {    # Child
     $poe_kernel->has_forked;
@@ -65,7 +68,7 @@ $uri->path( '/dynamic/debug.txt' );
 my $req = HTTP::Request->new( GET => $uri );
 my $resp = $UA->request( $req );
 
-ok( $resp->is_success, "One request" ) or die Dumper $resp;
+ok( $resp->is_success, "One request" ) or die pp $resp;
 
 our( $PID, $REQ, $RESP );
 eval $resp->content;
@@ -78,7 +81,7 @@ ok( $id, "Got a connection ID" );
 $req = HTTP::Request->new( GET => $uri );
 $resp = $UA->request( $req );
 
-ok( $resp->is_success, "One request" ) or die Dumper $resp;
+ok( $resp->is_success, "One request" ) or die pp $resp;
 eval $resp->content;
 die $@ if $@;
 
@@ -90,7 +93,7 @@ $CC->drop;
 $req = HTTP::Request->new( GET => $uri );
 $resp = $UA->request( $req );
 
-ok( $resp->is_success, "Third request" ) or die Dumper $resp;
+ok( $resp->is_success, "Third request" ) or die pp $resp;
 eval $resp->content;
 die $@ if $@;
 
@@ -104,7 +107,7 @@ $req = HTTP::Request->new( GET => $uri );
 $resp = $UA->request( $req );
 ok( $resp->is_success, "GET $uri" ) or die "Failed: ", pp $resp;
 
-while( <CHILD> ) {
+while( <$child> ) {
     diag( $_ );
 }
 

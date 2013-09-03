@@ -1,12 +1,15 @@
 Changes
-Makefile.PL
 MANIFEST
+Makefile.PL
 README
+eg/index.html
+eg/poex-httpd
+eg/something.txt
 lib/POEx/HTTP/Server.pm
-lib/POEx/HTTP/Server/Request.pm
-lib/POEx/HTTP/Server/Response.pm
 lib/POEx/HTTP/Server/Connection.pm
 lib/POEx/HTTP/Server/Error.pm
+lib/POEx/HTTP/Server/Request.pm
+lib/POEx/HTTP/Server/Response.pm
 t/00_compile.t
 t/01_pod.t
 t/02_pod_coverage.t
@@ -19,8 +22,8 @@ t/26_prefork.t
 t/30_specials.t
 t/31_error.t
 t/32_stream.t
+t/ForkPipe.pm
 t/Server.pm
 t/something.txt
-eg/index.html
-eg/poex-httpd
-eg/something.txt
+META.yml                                 Module YAML meta-data (added by MakeMaker)
+META.json                                Module JSON meta-data (added by MakeMaker)
